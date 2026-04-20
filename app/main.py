@@ -61,7 +61,12 @@ def create_app() -> FastAPI:
         )
 
     if settings.TRUSTED_HOSTS:
-        app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.TRUSTED_HOSTS)
+        allowed_hosts = {host.strip() for host in settings.TRUSTED_HOSTS if host.strip()}
+        # Railway health checks can use internal hostnames. Include them so probes
+        # are not rejected with 400 by TrustedHostMiddleware.
+        if settings.is_production:
+            allowed_hosts.update({"*.up.railway.app", "*.railway.internal", "localhost", "127.0.0.1"})
+        app.add_middleware(TrustedHostMiddleware, allowed_hosts=sorted(allowed_hosts))
 
     @app.get("/health")
     async def root_health() -> dict[str, str]:
