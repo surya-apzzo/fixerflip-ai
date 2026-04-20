@@ -2,12 +2,10 @@
 PYTHONUNBUFFERED = "1"
 
 [phases.setup]
-nixPkgs = ["python311", "gcc"]
+nixPkgs = ["python311", "python311Packages.pip", "gcc"]
 
 [phases.install]
 cmds = [
-  "python -m ensurepip --upgrade || true",
-  "python -m pip install --upgrade pip",
   "python -m pip install -r requirements.txt"
 ]
 
