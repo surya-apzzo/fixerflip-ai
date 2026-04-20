@@ -5,6 +5,8 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
+EXPOSE 8080
+
 COPY requirements.txt /app/
 
 RUN python -m venv /opt/venv
