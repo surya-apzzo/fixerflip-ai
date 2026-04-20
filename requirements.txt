@@ -4,6 +4,8 @@ gunicorn>=21.2.0
 pydantic>=2.5.3
 pydantic-settings>=2.1.0
 openai>=1.51.0
+aiofiles>=23.0.0
+redis>=5.0.0
 
 # Dev Dependencies
 pytest>=7.4.4
