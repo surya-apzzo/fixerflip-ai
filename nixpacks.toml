@@ -1,15 +1,2 @@
 [variables]
 PYTHONUNBUFFERED = "1"
-
-[phases.setup]
-nixPkgs = ["python311", "gcc"]
-
-[phases.install]
-cmds = [
-  "python -m venv /opt/venv",
-  "/opt/venv/bin/python -m pip install --upgrade pip",
-  "/opt/venv/bin/python -m pip install -r requirements.txt"
-]
-
-[start]
-cmd = "/opt/venv/bin/gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --graceful-timeout 30 --keep-alive 5"

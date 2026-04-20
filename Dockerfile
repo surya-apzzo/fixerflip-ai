@@ -5,13 +5,12 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-COPY requirements.txt /app/requirements.txt
+COPY requirements.txt /app/
 
-# Create isolated Python environment to avoid PEP 668 issues.
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-RUN pip install --upgrade pip && pip install -r /app/requirements.txt
+RUN pip install --upgrade pip && pip install -r requirements.txt
 
 COPY . /app
 
