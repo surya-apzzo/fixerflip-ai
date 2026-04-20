@@ -63,6 +63,24 @@ def create_app() -> FastAPI:
     if settings.TRUSTED_HOSTS:
         app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.TRUSTED_HOSTS)
 
+    @app.get("/health")
+    async def root_health() -> dict[str, str]:
+        """
+        Root-level health endpoint for platform checks.
+        """
+        return {
+            "status": "ok",
+            "service": settings.PROJECT_NAME,
+            "environment": settings.ENVIRONMENT,
+        }
+
+    @app.get("/")
+    async def root() -> dict[str, str]:
+        """
+        Minimal root endpoint so load balancers always receive a fast 200.
+        """
+        return {"status": "ok"}
+
     app.include_router(api_router, prefix=settings.API_V1_STR)
 
     ui_dir = Path(__file__).resolve().parent.parent / "ui"
