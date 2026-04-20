@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$ROOT_DIR"
+
+if [ ! -d ".venv" ]; then
+  echo "Creating virtual environment..."
+  python3 -m venv .venv
+fi
+
+if [ ! -x ".venv/bin/uvicorn" ]; then
+  echo "Installing dependencies..."
+  .venv/bin/pip install -r requirements.txt
+fi
+
+if [ ! -f ".env" ]; then
+  cat > .env <<'EOF'
+ENVIRONMENT=local
+DEBUG=true
+LOG_LEVEL=INFO
+OPENAI_VISION_ENABLED=false
+OPENAI_API_KEY=
+OPENAI_VISION_MODEL=gpt-4o-mini
+EOF
+  echo "Created default .env file."
+fi
+
+# Runtime mode:
+# - Default (dev): autoreload enabled, single worker.
+# - Production-like (for load tests): set UVICORN_WORKERS>1 to disable reload and run multi-worker.
+UVICORN_HOST="${UVICORN_HOST:-0.0.0.0}"
+UVICORN_PORT="${UVICORN_PORT:-8000}"
+UVICORN_WORKERS="${UVICORN_WORKERS:-1}"
+
+if [ "$UVICORN_WORKERS" -gt 1 ]; then
+  echo "Starting uvicorn in production-like mode: workers=$UVICORN_WORKERS, reload=off"
+  exec .venv/bin/uvicorn app.main:app --host "$UVICORN_HOST" --port "$UVICORN_PORT" --workers "$UVICORN_WORKERS"
+fi
+
+echo "Starting uvicorn in dev mode: workers=1, reload=on"
+exec .venv/bin/uvicorn app.main:app --host "$UVICORN_HOST" --port "$UVICORN_PORT" --reload
