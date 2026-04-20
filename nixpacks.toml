@@ -5,7 +5,11 @@ PYTHONUNBUFFERED = "1"
 nixPkgs = ["python311", "gcc"]
 
 [phases.install]
-cmds = ["pip install --upgrade pip", "pip install -r requirements.txt"]
+cmds = [
+  "python -m ensurepip --upgrade || true",
+  "python -m pip install --upgrade pip",
+  "python -m pip install -r requirements.txt"
+]
 
 [start]
 cmd = "gunicorn -k uvicorn.workers.UvicornWorker app.main:app --bind 0.0.0.0:$PORT --workers 1 --timeout 120 --graceful-timeout 30 --keep-alive 5"
