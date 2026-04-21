@@ -1,4 +1,5 @@
 from typing import List, Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -27,7 +28,7 @@ class ImageConditionResult(BaseModel):
 
 class IssueDetection(BaseModel):
     type: str
-    severity: str = "moderate"  # minor | moderate | severe
+    severity: str = "moderate"
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
 

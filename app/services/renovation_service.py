@@ -13,7 +13,8 @@ from app.engine.renovation_engine.renovation_cost_engine import (
     estimate_renovation_cost,
 )
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
-from app.schemas.renovation_api import RenovatedImageResult, RenovationEstimateRequest, RenovationEstimateResponse
+from app.schemas.requests.renovation import RenovationEstimateRequest
+from app.schemas.responses.renovation import RenovatedImageResult, RenovationEstimateResponse
 
 logger = logging.getLogger(__name__)
 

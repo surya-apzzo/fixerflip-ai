@@ -3,8 +3,6 @@ from __future__ import annotations
 from pydantic import BaseModel, Field, field_validator
 
 from app.core.rules_config import DEFAULT_ADMIN_LABOR_INDEX, DEFAULT_ADMIN_MATERIAL_INDEX
-from app.schemas.condition import ImageConditionResult
-from app.schemas.estimate import RenovationEstimate
 
 
 class RenovationEstimateRequest(BaseModel):
@@ -84,14 +82,3 @@ class RenovationEstimateRequest(BaseModel):
         normalized = aliases.get(raw, raw)
         allowed = {"cosmetic", "standard", "premium", "luxury"}
         return normalized if normalized in allowed else "standard"
-
-
-class RenovatedImageResult(BaseModel):
-    renovated_image_url: str
-
-
-class RenovationEstimateResponse(BaseModel):
-    image_condition: ImageConditionResult
-    estimate: RenovationEstimate
-    renovated_image: RenovatedImageResult | None = None
-    renovated_image_error: str | None = None

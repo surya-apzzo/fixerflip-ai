@@ -1,6 +1,8 @@
 from typing import List, Literal
+
 from pydantic import BaseModel, Field
-from app.schemas.line_item import RenovationLineItem
+
+from app.schemas.responses.line_item import RenovationLineItem
 
 
 class ImpactedElementDetail(BaseModel):
