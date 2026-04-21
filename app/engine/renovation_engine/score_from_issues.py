@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Optional
 
-from app.engine.renovation_engine.schemas import AgeDetectionResult, GapScoreResult
+from app.schemas import AgeDetectionResult, GapScoreResult
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:

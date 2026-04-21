@@ -11,7 +11,7 @@ from collections import defaultdict
 from typing import List
 
 from app.core.rules_config import CANONICAL_ISSUE_TYPES, ISSUE_WEIGHTS
-from app.engine.renovation_engine.schemas import (
+from app.schemas import (
     ImageConditionResult,
     IssueDetection,
     RoomDetection,

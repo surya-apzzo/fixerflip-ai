@@ -21,7 +21,7 @@ from app.engine.renovation_engine.image_condition_engine import (
     CANONICAL_POSITIVE_TYPES,
     ImageConditionEngine,
 )
-from app.engine.renovation_engine.schemas import (
+from app.schemas import (
     ImageConditionResult,
     IssueDetection,
     PositiveDetection,

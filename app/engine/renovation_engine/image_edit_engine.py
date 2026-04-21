@@ -10,7 +10,7 @@ from openai import AsyncOpenAI
 
 from app.core import redis_cache
 from app.core.config import settings
-from app.engine.renovation_engine.schemas import ImageEditResult
+from app.schemas import ImageEditResult
 
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"

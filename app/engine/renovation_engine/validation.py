@@ -1,9 +1,6 @@
-"""Backward-compatible imports for renovation domain models.
+"""Backward-compatible imports for renovation domain models."""
 
-Prefer: ``from app.engine.renovation_engine.schemas import ...``
-"""
-
-from app.engine.renovation_engine.schemas import (
+from app.schemas import (
     AgeDetectionResult,
     GapScoreResult,
     ImageConditionResult,

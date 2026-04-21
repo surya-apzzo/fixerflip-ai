@@ -4,7 +4,7 @@ from app.engine.renovation_engine.score_from_issues import (
     compute_gap_score,
     compute_renovation_age_detection,
 )
-from app.engine.renovation_engine.schemas import (
+from app.schemas import (
     AgeDetectionResult,
     GapScoreResult,
     ImageConditionResult,
