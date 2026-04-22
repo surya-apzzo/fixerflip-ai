@@ -15,6 +15,7 @@ from app.engine.renovation_engine.renovation_cost_engine import (
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
 from app.schemas.requests.renovation import RenovationEstimateRequest
 from app.schemas.responses.renovation import RenovatedImageResult, RenovationEstimateResponse
+from app.services.storage_service import upload_base64_image_to_bucket
 
 logger = logging.getLogger(__name__)
 
@@ -110,9 +111,18 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
             logger.warning("Renovation image edit failed: %s", edit_result)
             renovated_image_error = str(edit_result) if isinstance(edit_result, ValueError) else _PUBLIC_IMAGE_EDIT_ERROR
         else:
-            renovated_image = RenovatedImageResult(
-                renovated_image_url=f"data:{edit_result.media_type};base64,{edit_result.image_base64}",
-            )
+            try:
+                uploaded_url = await upload_base64_image_to_bucket(
+                    image_base64=edit_result.image_base64,
+                    media_type=edit_result.media_type,
+                )
+                renovated_image = RenovatedImageResult(renovated_image_url=uploaded_url)
+            except Exception as upload_exc:
+                logger.warning("Renovated image upload failed: %s", upload_exc)
+                renovated_image = RenovatedImageResult(
+                    renovated_image_url=f"data:{edit_result.media_type};base64,{edit_result.image_base64}",
+                )
+                renovated_image_error = f"Image upload failed: {upload_exc}"
     else:
         if payload.condition_score is None:
             raise HTTPException(

@@ -58,6 +58,14 @@ class Settings(BaseSettings):
     # Optional: Referer sent when downloading MLS/CDN image URLs (some return 403 without a browser-like Referer).
     # Example: https://www.realty.com/ or the URL your CDN expects.
     IMAGE_DOWNLOAD_REFERER: str = ""
+    STORAGE_ENDPOINT_URL: str = ""
+    STORAGE_REGION: str = "auto"
+    STORAGE_BUCKET_NAME: str = ""
+    STORAGE_ACCESS_KEY_ID: str = ""
+    STORAGE_SECRET_ACCESS_KEY: str = ""
+    STORAGE_PUBLIC_BASE_URL: str = ""
+    STORAGE_RENOVATED_IMAGE_PREFIX: str = "renovated"
+    STORAGE_PRESIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
@@ -76,6 +84,20 @@ class Settings(BaseSettings):
     @field_validator("IMAGE_DOWNLOAD_REFERER", mode="before")
     @classmethod
     def strip_image_download_referer(cls, v: str | None) -> str:
+        return (v or "").strip()
+
+    @field_validator(
+        "STORAGE_ENDPOINT_URL",
+        "STORAGE_REGION",
+        "STORAGE_BUCKET_NAME",
+        "STORAGE_ACCESS_KEY_ID",
+        "STORAGE_SECRET_ACCESS_KEY",
+        "STORAGE_PUBLIC_BASE_URL",
+        "STORAGE_RENOVATED_IMAGE_PREFIX",
+        mode="before",
+    )
+    @classmethod
+    def normalize_storage_strings(cls, v: str | None) -> str:
         return (v or "").strip()
 
     @property

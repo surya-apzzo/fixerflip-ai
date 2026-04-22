@@ -1,6 +1,8 @@
 from fastapi import APIRouter
 
+from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
 from app.schemas.requests.renovation import RenovationEstimateRequest
+from app.schemas.responses.condition import ImageConditionResult
 from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.services.renovation_service import build_renovation_estimate
 

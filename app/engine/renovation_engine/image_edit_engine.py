@@ -1,6 +1,8 @@
-"""Image edit engine: OpenAI -> Image."""
+"""Image edit engine: OpenAI image edit with generation fallback."""
 from __future__ import annotations
 
+import base64
+import logging
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -28,6 +30,16 @@ _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+_STRUCTURAL_PRESERVATION_RULES = (
+    "Non-negotiable structural preservation rules:\n"
+    "- Preserve the exact position and shape of stairs, treads, risers, landings, railings, doorways, hall openings, "
+    "columns, cabinets, counters, built-ins, and major room openings.\n"
+    "- Do not invent new steps, platforms, doors, partitions, ramps, or obstacles anywhere in the walking path.\n"
+    "- If debris is removed from the floor, reveal a natural open walkway underneath it; do not replace debris with "
+    "new furniture-like slabs, platforms, or blocked passages.\n"
+    "- Keep floor plane, circulation path, and access to adjacent spaces realistic and unobstructed."
+)
+logger = logging.getLogger(__name__)
 
 
 def _headers_for_image_download(image_url: str) -> dict[str, str]:
@@ -192,31 +204,80 @@ async def edit_property_image_from_url(
         if preserve_elements is not None
         else _constraints_for_instruction(instruction.strip())
     )
-    prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
+    prompt = (
+        f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}\n\n"
+        f"{_STRUCTURAL_PRESERVATION_RULES}"
+    )
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    # input_fidelity + quality: keep intact areas (side walls, plants, built-ins) closer to the source; only default "low"
-    # tends to re-invent the whole scene and drop edge detail.
-    response = await client.images.edit(
-        model=settings.default_openai_image_edit_model,
-        image=("property_image.png", image_bytes, media_type),
-        prompt=prompt,
-        size="auto",
-        input_fidelity="high",
-        quality="high",
-    )
+    edit_model = settings.default_openai_image_edit_model
+    edit_kwargs = {
+        "model": edit_model,
+        "image": ("property_image.png", image_bytes, media_type),
+        "prompt": prompt,
+        "size": "auto",
+    }
+    if edit_model in {"gpt-image-1", "gpt-image-1.5"}:
+        # Preserve source-room geometry more faithfully for real-estate edits.
+        edit_kwargs["input_fidelity"] = "high"
 
-    data = getattr(response, "data", None) or []
-    if not data or not getattr(data[0], "b64_json", None):
-        raise ValueError("Image edit failed: no image returned.")
+    try:
+        response = await client.images.edit(**edit_kwargs)
+        data = getattr(response, "data", None) or []
+        if not data or not getattr(data[0], "b64_json", None):
+            raise ValueError("Image edit failed: no image returned.")
+        first = data[0]
+        revised_prompt = getattr(first, "revised_prompt", "") or prompt
+        return ImageEditResult(
+            revised_prompt=revised_prompt,
+            image_base64=first.b64_json,
+            media_type="image/png",
+        )
+    except Exception as exc:
+        # Some projects cannot use /images/edits due model compatibility.
+        logger.warning(
+            "OpenAI image edit failed for model=%s; using generation fallback: %s",
+            edit_model,
+            exc,
+        )
+        generation_prompt = (
+            f"{prompt}\n\nSource image URL for reference: {image_url.strip()}\n"
+            "Generate a renovated version that preserves composition and layout."
+        )
+        gen_response = await client.images.generate(
+            model="gpt-image-1",
+            prompt=generation_prompt,
+            size="1024x1024",
+        )
+        gen_data = getattr(gen_response, "data", None) or []
+        if not gen_data:
+            raise ValueError("Image generation fallback returned no data.")
 
-    first = data[0]
-    revised_prompt = getattr(first, "revised_prompt", "") or prompt
-    return ImageEditResult(
-        revised_prompt=revised_prompt,
-        image_base64=first.b64_json,
-        media_type="image/png",
-    )
+        first_gen = gen_data[0]
+        b64 = getattr(first_gen, "b64_json", None)
+        if b64:
+            return ImageEditResult(
+                revised_prompt=prompt,
+                image_base64=b64,
+                media_type="image/png",
+            )
+
+        generated_url = getattr(first_gen, "url", None) or ""
+        if not generated_url:
+            raise ValueError("Image generation fallback returned neither b64_json nor url.")
+
+        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as gen_client:
+            download = await gen_client.get(generated_url)
+            download.raise_for_status()
+        generated_media_type = (
+            download.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
+        )
+        encoded = base64.b64encode(download.content).decode("utf-8")
+        return ImageEditResult(
+            revised_prompt=prompt,
+            image_base64=encoded,
+            media_type=generated_media_type,
+        )
 
 
 async def _download_image(image_url: str) -> tuple[bytes, str]:
