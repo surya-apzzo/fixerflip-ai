@@ -77,6 +77,7 @@ def _build_renovation_estimate_input(
 async def build_renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
     payload = validate_and_normalize_renovation_payload(payload)
     pipeline_warnings: list[str] = []
+    renovated_image_url: str | None = None
 
     if payload.image_url:
         resolved_target_style = _resolve_target_style(payload)
@@ -117,7 +118,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
             pipeline_warnings.append(error_message)
         else:
             try:
-                await upload_base64_image_to_bucket(
+                renovated_image_url = await upload_base64_image_to_bucket(
                     image_base64=edit_result.image_base64,
                     media_type=edit_result.media_type,
                 )
@@ -176,4 +177,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     if pipeline_warnings:
         estimate = estimate.model_copy(update={"assumptions": [*estimate.assumptions, *pipeline_warnings]})
 
-    return to_production_renovation_response(estimate)
+    return to_production_renovation_response(
+        estimate,
+        renovated_image_url=renovated_image_url,
+    )

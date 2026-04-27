@@ -80,12 +80,35 @@ def test_estimate_response_contract_shape(client, monkeypatch):
         "suggested_work_items",
         "confidence_score",
         "explanation_summary",
+        "renovated_image_url",
     }
     assert body["renovation_class"] == "Moderate"
     assert body["estimated_renovation_range"] == "$45,000 - $72,000"
     assert body["estimated_timeline"] == "6-10 weeks"
     assert body["confidence_score"] == "82%"
+    assert body["renovated_image_url"] == "https://example.com/renovated.png"
     assert "possible systems review" in body["suggested_work_items"]
+
+
+def test_estimate_manual_fallback_has_no_renovated_image(client, monkeypatch):
+    monkeypatch.setattr(renovation_service, "estimate_renovation_cost", lambda _data: _build_estimate_fixture())
+    monkeypatch.setattr(renovation_service, "apply_user_input_cost_adjustments", lambda estimate, *_args, **_kwargs: estimate)
+
+    response = client.post(
+        "/api/v1/renovation/estimate",
+        json={
+            "sqft": 1200,
+            "beds": 3,
+            "baths": 2,
+            "condition_score": 55,
+            "issues": ["paint wear"],
+            "room_type": "kitchen",
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["renovated_image_url"] is None
 
 
 def test_estimate_validation_error_shape(client):
