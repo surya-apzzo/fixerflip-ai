@@ -1,55 +1,256 @@
-# FixerFlip Renovation Image Condition API
+# FixerFlip AI Renovation API
 
-This repo contains the **Renovation Image Condition** module only.
+FastAPI service for estimating renovation scope, cost, and timeline from property facts plus an optional listing photo.
 
-## Run
+The current codebase focuses on a renovation workflow:
 
-```bash
-./run.dev
+- analyze one property image for visible condition issues
+- estimate renovation class, cost range, and timeline
+- generate a renovated preview image as a side effect when image editing is enabled
+- expose simple health checks and OpenAPI docs for local/dev and deployment use
+
+## What This Service Does
+
+The main endpoint is `POST /api/v1/renovation/estimate`.
+
+You send:
+
+- property facts such as `sqft`, `beds`, `baths`, `year_built`, and `zip_code`
+- either an `image_url` or a manual `condition_score`
+- optional market context like `avg_area_price_per_sqft`
+- optional renovation preferences like `desired_quality_level`, `renovation_elements`, and `user_inputs`
+
+The service returns:
+
+- `renovation_class`
+- `estimated_renovation_range`
+- `estimated_timeline`
+- `suggested_work_items`
+- `confidence_score`
+- `explanation_summary`
+
+There is also a lighter endpoint, `POST /api/v1/renovation/image-condition`, for image-only condition scoring.
+
+## How The Pipeline Works
+
+1. Request validation and normalization happen in `app/services/renovation_payload_validator.py`.
+2. If `image_url` is present, the service runs two async tasks in parallel:
+   - OpenAI vision analysis to detect room type and visible issues
+   - OpenAI image editing to create a renovated preview
+3. The estimate engine converts the condition result plus property inputs into:
+   - renovation class (`Cosmetic`, `Moderate`, `Heavy`, `Full Gut`)
+   - cost line items
+   - total min/max estimate
+   - timeline estimate
+   - work item suggestions
+   - confidence score
+4. The public response mapper trims the rich internal estimate into the production API contract.
+5. If storage is configured, the edited image is uploaded to an S3-compatible bucket. This is currently a side effect only; the public estimate response does not return the uploaded URL.
+
+If no `image_url` is supplied, the service requires a manual `condition_score` and skips vision analysis.
+
+## Tech Stack
+
+- Python 3.11
+- FastAPI
+- Pydantic v2
+- Uvicorn / Gunicorn
+- OpenAI Responses API for vision
+- OpenAI Images API for renovation previews
+- Redis for optional image download caching
+- S3-compatible object storage for optional preview uploads
+
+## Project Layout
+
+```text
+app/
+  api/v1/                  Versioned routes
+  core/                    Settings, logging, error handlers, cache helpers
+  engine/renovation_engine/Condition scoring, cost estimation, image edit logic
+  middleware/              Request ID and security headers
+  prompts/                 Prompt templates for vision and image edits
+  schemas/                 Request/response models
+  services/                Orchestration, payload validation, response mapping, storage
+tests/                     API contract tests
+ui/                        Simple static tester
 ```
 
-Open docs:
+## Local Development
+
+### Option 1: Cross-platform manual setup
+
+Create a virtual environment and install dependencies:
+
+```bash
+python -m venv .venv
+```
+
+PowerShell:
+
+```powershell
+.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
+Copy-Item .env.example .env
+uvicorn app.main:app --reload
+```
+
+macOS/Linux:
+
+```bash
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload
+```
+
+Open:
+
 - `http://127.0.0.1:8000/docs`
+- `http://127.0.0.1:8000/health`
+- `http://127.0.0.1:8000/api/v1/health`
 
-## Endpoint
+### Option 2: Use the included dev script
 
-### Image condition score (0–100)
-`POST /api/v1/renovation/image-condition`
+`run.dev` bootstraps `.venv`, installs dependencies, creates a minimal `.env`, and starts Uvicorn with reload.
 
-- **Input**: JSON with a single `image_url` (from ATTOM / MLS / RealEstateAPI)
-- **Output**:
+```bash
+bash run.dev
+```
+
+This script is Unix-oriented. On Windows, use Git Bash/WSL or the manual setup above.
+
+## Environment Variables
+
+### Core
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `PROJECT_NAME` | FastAPI app title | `FastAPI Production App` |
+| `ENVIRONMENT` | Controls production behavior | `local` |
+| `DEBUG` | Enables debug-friendly behavior | `false` |
+| `LOG_LEVEL` | Logging level | `INFO` |
+| `LOG_JSON` | Emit JSON logs | `false` |
+| `ENABLE_OPENAPI` | Expose `/docs` and OpenAPI | `true` |
+| `BACKEND_CORS_ORIGINS` | Production CORS allowlist | `[]` |
+| `TRUSTED_HOSTS` | Optional host header allowlist | `[]` |
+
+### OpenAI
+
+| Variable | Purpose |
+| --- | --- |
+| `OPENAI_API_KEY` | Required for vision and image editing |
+| `OPENAI_VISION_ENABLED` | Enables image condition analysis |
+| `OPENAI_VISION_MODEL` | Primary vision model |
+| `OPENAI_MODEL` | Secondary/fallback model hint |
+| `OPENAI_IMAGE_EDIT_MODEL` | Model for edited renovation previews |
+
+### Caching and image downloads
+
+| Variable | Purpose |
+| --- | --- |
+| `REDIS_URL` | Optional Redis cache |
+| `REDIS_CACHE_TTL_SECONDS` | TTL for cached image downloads |
+| `IMAGE_DOWNLOAD_REFERER` | Override referer for MLS/CDN image hosts that block generic requests |
+
+### Storage upload
+
+| Variable | Purpose |
+| --- | --- |
+| `STORAGE_ENDPOINT_URL` | S3-compatible endpoint |
+| `STORAGE_REGION` | Storage region |
+| `STORAGE_BUCKET_NAME` | Target bucket |
+| `STORAGE_ACCESS_KEY_ID` | Access key |
+| `STORAGE_SECRET_ACCESS_KEY` | Secret key |
+| `STORAGE_PUBLIC_BASE_URL` | Optional public base URL |
+| `STORAGE_RENOVATED_IMAGE_PREFIX` | Object key prefix for generated previews |
+| `STORAGE_PRESIGNED_URL_TTL_SECONDS` | Presigned URL lifetime |
+
+## API Endpoints
+
+### `GET /`
+
+Minimal root endpoint:
+
+```json
+{"status":"ok"}
+```
+
+### `GET /health`
+
+Root-level health endpoint used by deployment platforms such as Railway.
+
+Example response:
+
+```json
+{
+  "status": "ok",
+  "service": "FastAPI Production App",
+  "environment": "local"
+}
+```
+
+### `GET /api/v1/health`
+
+Versioned health endpoint with the same response shape.
+
+### `POST /api/v1/renovation/image-condition`
+
+Single-image condition analysis. In the current implementation, `image_url` is accepted as a query parameter.
+
+Example:
+
+```bash
+curl -X POST "http://127.0.0.1:8000/api/v1/renovation/image-condition?image_url=https://example.com/property.jpg"
+```
+
+Typical response:
 
 ```json
 {
   "condition_score": 72,
-  "issues": ["outdated kitchen cabinets", "wall stains", "old carpet"],
-  "room_type": "kitchen"
+  "issues": ["outdated cabinets", "paint wear", "floor damage"],
+  "room_type": "kitchen",
+  "issue_details": [
+    {
+      "type": "outdated cabinets",
+      "severity": "moderate",
+      "confidence": 0.88
+    }
+  ]
 }
 ```
 
-Example `curl`:
+If vision is disabled or unavailable, the service falls back to a conservative default score.
 
-```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/renovation/image-condition" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "image_url": "https://example-cdn.com/property/photo1.jpg"
-  }'
-```
+### `POST /api/v1/renovation/estimate`
 
-### Renovation estimate (cost + timeline)
+Primary estimation endpoint.
 
-`POST /api/v1/renovation/estimate`
+Required fields:
 
-- **Input**: property facts + either a single `image_url` OR manual fallback `condition_score`.
-- **Output**: image condition + renovation class + low/mid/high estimate + timeline + suggested work items + confidence + explanation.
-- **Optional market context (no DB required)**:
-  - `avg_area_price_per_sqft`
-  - `years_since_last_sale`
-  - `permit_years_since_last`
-  - These sharpen confidence/timeline and assumptions if your backend already has those values from external APIs.
+- `sqft`
+- `beds`
+- `baths`
+- one of:
+  - `image_url`
+  - `condition_score`
 
-Example with manual fallback (no image call):
+Useful optional fields:
+
+- `year_built`
+- `zip_code`
+- `listing_price`
+- `listing_description`
+- `days_on_market`
+- `avg_area_price_per_sqft`
+- `years_since_last_sale`
+- `permit_years_since_last`
+- `desired_quality_level`: `cosmetic`, `standard`, `premium`, `luxury`
+- `renovation_elements`
+- `user_inputs`
+- `reference_image_url`
+
+Manual fallback example:
 
 ```bash
 curl -X POST "http://127.0.0.1:8000/api/v1/renovation/estimate" \
@@ -63,75 +264,100 @@ curl -X POST "http://127.0.0.1:8000/api/v1/renovation/estimate" \
     "issues": ["old tiles", "paint wear", "roof damage"],
     "room_type": "kitchen,exterior",
     "labor_index": 1.10,
-    "material_index": 1.05
+    "material_index": 1.05,
+    "desired_quality_level": "standard"
   }'
 ```
 
-### Valuation (ARV + ROI)
-
-`POST /api/v1/valuation/analyze`
-
-- Uses comp-based ARV first, with renovation-level adjustment (`standard`, `premium`, `luxury`)
-- Calculates estimated profit, ROI %, margin, and 3-point sensitivity view
+Image-based example:
 
 ```bash
-curl -X POST "http://127.0.0.1:8000/api/v1/valuation/analyze" \
+curl -X POST "http://127.0.0.1:8000/api/v1/renovation/estimate" \
   -H "Content-Type: application/json" \
   -d '{
-    "purchase_price": 350000,
-    "sqft": 1800,
-    "lot_size": 5200,
+    "image_url": "https://example.com/property.jpg",
+    "sqft": 1400,
     "beds": 3,
     "baths": 2,
-    "year_built": 1988,
-    "property_type": "SFR",
-    "neighborhood_price_per_sqft": 250,
-    "renovation_level": "standard",
-    "market_trend_adjustment": 0.01,
-    "estimated_renovation_cost": 70000,
-    "estimated_holding_cost": 10000,
-    "closing_cost": 5000,
-    "financing_cost": 8000,
-    "selling_cost": 15000,
-    "comparable_renovated_sales": [
-      {"comp_id":"comp-1","sold_price":470000,"sqft":1820,"distance_miles":0.4,"days_ago":45,"renovated":true}
-    ]
+    "zip_code": "78704",
+    "desired_quality_level": "premium",
+    "renovation_elements": ["kitchen", "paint"],
+    "user_inputs": "Keep the layout but modernize the kitchen and repaint walls."
   }'
 ```
 
-## Enable OpenAI Vision (optional)
+Typical response:
 
-By default, the service returns a conservative fallback score when vision is disabled.
-
-In `.env`:
-
-```env
-OPENAI_VISION_ENABLED=true
-OPENAI_API_KEY=your_key_here
-OPENAI_MODEL=gpt-4o-mini
+```json
+{
+  "renovation_class": "Moderate",
+  "estimated_renovation_range": "$45,000 - $72,000",
+  "estimated_timeline": "6-10 weeks",
+  "suggested_work_items": [
+    "paint",
+    "flooring",
+    "kitchen update"
+  ],
+  "confidence_score": "82%",
+  "explanation_summary": "Property is classified as Moderate rehab based on kitchen condition and detected issues."
+}
 ```
 
-The prompt used for vision extraction is:
-- `app/prompts/renovation_image_condition_prompt.txt`
+Validation errors return HTTP `422` with a `VALIDATION_ERROR` code.
 
-## Simple UI tester
+## Estimation Logic Notes
 
-There is a basic test UI at:
+The cost engine is rule-based and deterministic after inputs are prepared. It uses:
+
+- issue severity and issue count
+- requested quality level
+- labor and material indices
+- room type and suggested scope categories
+- market gap signal (`listing_price` vs area price-per-sqft context)
+- age signal (`year_built`, years since sale, years since permit)
+- selected renovation elements or user-entered scope hints
+
+The public response is intentionally compact even though the internal estimate model contains richer details such as line items, assumptions, impacted elements, and confidence labels.
+
+## Simple UI
+
+A lightweight tester is included at:
+
 - `ui/renovation_v1_simple.html`
 
-Open it in your browser and:
-- set API URL (default is `http://127.0.0.1:8000/api/v1/renovation/image-condition`)
-- paste one image URL
-- click **Analyze**
+When the app is running, it is also served from:
 
-It will show response JSON on screen.
+- `http://127.0.0.1:8000/ui/renovation_v1_simple.html`
 
-If opening `ui/renovation_v1_simple.html` directly causes browser fetch/CORS issues, serve the UI locally:
+## Tests
+
+Run the test suite with:
 
 ```bash
-python -m http.server 8080 -d ui
+pytest
 ```
 
-Then open:
-- `http://localhost:8080`
+Current tests focus on the renovation estimate response contract and validation error shape.
 
+## Deployment
+
+This repo already includes:
+
+- `Dockerfile`
+- `Procfile`
+- `railway.json`
+- `nixpacks.toml`
+
+Deployment details reflected in the codebase:
+
+- the container entrypoint runs `gunicorn` with `uvicorn.workers.UvicornWorker`
+- Railway health checks target `/health`
+- in non-production environments, CORS is wide open for easier local UI testing
+- in production/staging, CORS and trusted hosts are restricted through settings
+
+## Notes And Current Boundaries
+
+- This repo currently documents and implements renovation endpoints only.
+- The previous README mentioned a valuation endpoint, but that endpoint is not present in the current codebase.
+- The image-condition route currently accepts `image_url` as a query parameter, not a JSON body.
+- Renovated preview uploads happen as a background side effect of the estimate flow when storage is configured, but the uploaded URL is not yet returned by the public API response.
