@@ -847,7 +847,7 @@ def _estimate_timeline_weeks(
     days_on_market: int,
     age_score_points: int = 0,
 ) -> tuple[int, int]:
-    base = 6
+    base = 3
     if sqft > 1400:
         base += 2
     if sqft > 2200:

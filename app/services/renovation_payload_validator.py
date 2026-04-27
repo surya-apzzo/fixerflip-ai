@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
-from typing import TypedDict
+from typing import Any, TypedDict
 
 from fastapi import HTTPException
 
+from app.core.config import settings
 from app.schemas.requests.renovation import RenovationEstimateRequest
 
 _ALLOWED_QUALITY_LEVELS = {"cosmetic", "standard", "premium", "luxury"}
@@ -18,6 +19,14 @@ class ValidationErrorItem(TypedDict):
     message: str
 
 
+class NumericValidationRuleOverride(TypedDict, total=False):
+    minimum: float | None
+    maximum: float | None
+    min_inclusive: bool
+    max_inclusive: bool
+    message: str
+
+
 @dataclass(frozen=True, slots=True)
 class NumericValidationRule:
     field: str
@@ -26,54 +35,6 @@ class NumericValidationRule:
     maximum: float | None = None
     min_inclusive: bool = True
     max_inclusive: bool = True
-
-
-_NUMERIC_VALIDATION_RULES: tuple[NumericValidationRule, ...] = (
-    NumericValidationRule(
-        field="sqft",
-        minimum=0.0,
-        min_inclusive=False,
-        message="sqft must be greater than 0",
-    ),
-    NumericValidationRule(field="beds", minimum=0.0, message="beds must be >= 0"),
-    NumericValidationRule(field="baths", minimum=0.0, message="baths must be >= 0"),
-    NumericValidationRule(field="lot_size", minimum=0.0, message="lot_size must be >= 0"),
-    NumericValidationRule(field="listing_price", minimum=0.0, message="listing_price must be >= 0"),
-    NumericValidationRule(field="days_on_market", minimum=0.0, message="days_on_market must be >= 0"),
-    NumericValidationRule(
-        field="avg_area_price_per_sqft",
-        minimum=0.0,
-        message="avg_area_price_per_sqft must be >= 0",
-    ),
-    NumericValidationRule(
-        field="years_since_last_sale",
-        minimum=0.0,
-        message="years_since_last_sale must be >= 0",
-    ),
-    NumericValidationRule(
-        field="permit_years_since_last",
-        minimum=0.0,
-        message="permit_years_since_last must be >= 0",
-    ),
-    NumericValidationRule(
-        field="condition_score",
-        minimum=0.0,
-        maximum=100.0,
-        message="condition_score must be between 0 and 100",
-    ),
-    NumericValidationRule(
-        field="labor_index",
-        minimum=0.7,
-        maximum=2.5,
-        message="labor_index must be between 0.7 and 2.5",
-    ),
-    NumericValidationRule(
-        field="material_index",
-        minimum=0.7,
-        maximum=2.5,
-        message="material_index must be between 0.7 and 2.5",
-    ),
-)
 
 
 def _normalize_renovation_elements(value: object) -> list[str]:
@@ -142,6 +103,165 @@ def _append_error(errors: list[ValidationErrorItem], *, field: str, message: str
     errors.append({"field": field, "message": message})
 
 
+def _format_numeric_bound(value: float | None) -> str:
+    if value is None:
+        return ""
+    return str(int(value)) if float(value).is_integer() else f"{value:g}"
+
+
+def _build_numeric_validation_message(
+    *,
+    field: str,
+    minimum: float | None,
+    maximum: float | None,
+    min_inclusive: bool,
+    max_inclusive: bool,
+) -> str:
+    if minimum is not None and maximum is not None and min_inclusive and max_inclusive:
+        return f"{field} must be between {_format_numeric_bound(minimum)} and {_format_numeric_bound(maximum)}"
+    if minimum is not None and maximum is not None:
+        min_operator = ">=" if min_inclusive else ">"
+        max_operator = "<=" if max_inclusive else "<"
+        return (
+            f"{field} must be {min_operator} {_format_numeric_bound(minimum)} "
+            f"and {max_operator} {_format_numeric_bound(maximum)}"
+        )
+    if minimum is not None:
+        if minimum == 0 and not min_inclusive:
+            return f"{field} must be greater than 0"
+        operator = ">=" if min_inclusive else ">"
+        return f"{field} must be {operator} {_format_numeric_bound(minimum)}"
+    if maximum is not None:
+        operator = "<=" if max_inclusive else "<"
+        return f"{field} must be {operator} {_format_numeric_bound(maximum)}"
+    return f"{field} is invalid"
+
+
+def _build_numeric_rule(
+    *,
+    field: str,
+    minimum: float | None = None,
+    maximum: float | None = None,
+    min_inclusive: bool = True,
+    max_inclusive: bool = True,
+    message: str | None = None,
+) -> NumericValidationRule:
+    return NumericValidationRule(
+        field=field,
+        minimum=minimum,
+        maximum=maximum,
+        min_inclusive=min_inclusive,
+        max_inclusive=max_inclusive,
+        message=message
+        or _build_numeric_validation_message(
+            field=field,
+            minimum=minimum,
+            maximum=maximum,
+            min_inclusive=min_inclusive,
+            max_inclusive=max_inclusive,
+        ),
+    )
+
+
+def _coerce_rule_override_float(*, field: str, key: str, value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"VALIDATION_RULE_OVERRIDES[{field!r}][{key!r}] must be numeric") from exc
+    if not math.isfinite(numeric):
+        raise ValueError(f"VALIDATION_RULE_OVERRIDES[{field!r}][{key!r}] must be finite")
+    return numeric
+
+
+def _coerce_rule_override_bool(*, field: str, key: str, value: Any) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "1", "yes", "on"}:
+            return True
+        if normalized in {"false", "0", "no", "off"}:
+            return False
+    raise ValueError(f"VALIDATION_RULE_OVERRIDES[{field!r}][{key!r}] must be boolean")
+
+
+def _resolve_numeric_rule_override(field: str) -> NumericValidationRuleOverride:
+    raw = settings.VALIDATION_RULE_OVERRIDES.get(field, {})
+    if not isinstance(raw, dict):
+        return {}
+
+    override: NumericValidationRuleOverride = {}
+    if "minimum" in raw:
+        override["minimum"] = _coerce_rule_override_float(field=field, key="minimum", value=raw["minimum"])
+    if "maximum" in raw:
+        override["maximum"] = _coerce_rule_override_float(field=field, key="maximum", value=raw["maximum"])
+    if "min_inclusive" in raw:
+        override["min_inclusive"] = _coerce_rule_override_bool(
+            field=field,
+            key="min_inclusive",
+            value=raw["min_inclusive"],
+        )
+    if "max_inclusive" in raw:
+        override["max_inclusive"] = _coerce_rule_override_bool(
+            field=field,
+            key="max_inclusive",
+            value=raw["max_inclusive"],
+        )
+    if "message" in raw and raw["message"] is not None:
+        override["message"] = str(raw["message"]).strip()
+    return override
+
+
+def _apply_numeric_rule_override(
+    base_rule: NumericValidationRule,
+    override: NumericValidationRuleOverride,
+) -> NumericValidationRule:
+    minimum = override.get("minimum", base_rule.minimum)
+    maximum = override.get("maximum", base_rule.maximum)
+    min_inclusive = override.get("min_inclusive", base_rule.min_inclusive)
+    max_inclusive = override.get("max_inclusive", base_rule.max_inclusive)
+    message = override.get("message")
+    return _build_numeric_rule(
+        field=base_rule.field,
+        minimum=minimum,
+        maximum=maximum,
+        min_inclusive=min_inclusive,
+        max_inclusive=max_inclusive,
+        message=message,
+    )
+
+
+def _base_numeric_validation_rules(_payload: RenovationEstimateRequest) -> tuple[NumericValidationRule, ...]:
+    return (
+        _build_numeric_rule(
+            field="sqft",
+            minimum=0.0,
+            min_inclusive=False,
+        ),
+        _build_numeric_rule(field="beds", minimum=0.0),
+        _build_numeric_rule(field="baths", minimum=0.0),
+        _build_numeric_rule(field="lot_size", minimum=0.0),
+        _build_numeric_rule(field="listing_price", minimum=0.0),
+        _build_numeric_rule(field="days_on_market", minimum=0.0),
+        _build_numeric_rule(field="avg_area_price_per_sqft", minimum=0.0),
+        _build_numeric_rule(field="years_since_last_sale", minimum=0.0),
+        _build_numeric_rule(field="permit_years_since_last", minimum=0.0),
+        _build_numeric_rule(field="condition_score", minimum=0.0, maximum=100.0),
+        _build_numeric_rule(field="labor_index", minimum=0.7, maximum=2.5),
+        _build_numeric_rule(field="material_index", minimum=0.7, maximum=2.5),
+    )
+
+
+def _build_numeric_validation_rules(payload: RenovationEstimateRequest) -> tuple[NumericValidationRule, ...]:
+    dynamic_rules: list[NumericValidationRule] = []
+    for base_rule in _base_numeric_validation_rules(payload):
+        override = _resolve_numeric_rule_override(base_rule.field)
+        dynamic_rules.append(_apply_numeric_rule_override(base_rule, override))
+    return tuple(dynamic_rules)
+
+
 def _is_within_bounds(value: float, rule: NumericValidationRule) -> bool:
     if rule.minimum is not None:
         if rule.min_inclusive and value < rule.minimum:
@@ -182,7 +302,7 @@ def _validate_numeric_rule(
 def _validate_payload_values(payload: RenovationEstimateRequest) -> None:
     errors: list[ValidationErrorItem] = []
 
-    for rule in _NUMERIC_VALIDATION_RULES:
+    for rule in _build_numeric_validation_rules(payload):
         _validate_numeric_rule(errors=errors, payload=payload, rule=rule)
 
     if not payload.image_url and payload.condition_score is None:
