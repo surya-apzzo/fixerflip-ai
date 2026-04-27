@@ -2,7 +2,7 @@ from app.schemas.responses.condition import ImageConditionResult, IssueDetection
 from app.schemas.responses.estimate import ImpactedElementDetail, RenovationEstimate, RenovationEstimateInput
 from app.schemas.responses.image_edit import ImageEditResult
 from app.schemas.responses.line_item import RenovationLineItem
-from app.schemas.responses.renovation import RenovatedImageResult, RenovationEstimateResponse
+from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.schemas.responses.signals import AgeDetectionResult, GapScoreResult
 
 __all__ = [
@@ -13,7 +13,6 @@ __all__ = [
     "ImpactedElementDetail",
     "IssueDetection",
     "PositiveDetection",
-    "RenovatedImageResult",
     "RenovationEstimate",
     "RenovationEstimateInput",
     "RenovationEstimateResponse",

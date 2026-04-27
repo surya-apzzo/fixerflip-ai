@@ -1,8 +1,6 @@
-"""Image edit engine: OpenAI image edit with generation fallback."""
+"""Image edit engine: OpenAI -> Image."""
 from __future__ import annotations
 
-import base64
-import logging
 import re
 from pathlib import Path
 from urllib.parse import urlparse
@@ -14,7 +12,6 @@ from app.core import redis_cache
 from app.core.config import settings
 from app.schemas import ImageEditResult
 
-
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 _EDIT_PROMPT_BASE = _PROMPTS_DIR / "editing_image_visual.txt"
 _EDIT_PROMPT_BROAD = _PROMPTS_DIR / "editing_image_constraints_broad.txt"
@@ -25,24 +22,22 @@ _DEFAULT_IMAGE_EDIT_INSTRUCTION = (
     "Repair only visible damage/issues in this property photo. Preserve layout, walls, finishes, "
     "furniture, and all intact objects. Do not redesign or restage."
 )
-# MLS/CDN hosts (e.g. Cloudflare in front of imagecdn.realty.dev) often return 403 for httpx's default User-Agent.
+
+_NO_ISSUES_DETECTED_INSTRUCTION = (
+    "No specific AI-detected issues were found for this image. "
+    "Apply light cosmetic cleanup only: remove minor surface debris, "
+    "freshen paint where visibly worn, and clean surfaces. "
+    "Do not redesign, restage, or make structural changes. "
+    "Preserve all existing finishes, furniture, and room layout exactly."
+)
+
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
-_STRUCTURAL_PRESERVATION_RULES = (
-    "Non-negotiable structural preservation rules:\n"
-    "- Preserve the exact position and shape of stairs, treads, risers, landings, railings, doorways, hall openings, "
-    "columns, cabinets, counters, built-ins, and major room openings.\n"
-    "- Do not invent new steps, platforms, doors, partitions, ramps, or obstacles anywhere in the walking path.\n"
-    "- If debris is removed from the floor, reveal a natural open walkway underneath it; do not replace debris with "
-    "new furniture-like slabs, platforms, or blocked passages.\n"
-    "- Keep floor plane, circulation path, and access to adjacent spaces realistic and unobstructed."
-)
-logger = logging.getLogger(__name__)
 
 
-def _headers_for_image_download(image_url: str) -> dict[str, str]:
+def _build_image_download_headers(image_url: str) -> dict[str, str]:
     headers: dict[str, str] = {
         "User-Agent": _BROWSER_USER_AGENT,
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -70,7 +65,7 @@ _ELEMENT_HINTS = {
     "plumbing": "visible sinks, faucets, and plumbing fixtures",
 }
 
-# Build the instruction for the image edit.
+
 def build_instruction_for_edit(
     *,
     user_inputs: str,
@@ -80,6 +75,7 @@ def build_instruction_for_edit(
     resolved_target_style: str,
     reference_image_url: str = "",
     renovation_elements: list[str] | None = None,
+    detected_issues: list[str] | None = None,
 ) -> str:
     base_instruction = (user_inputs or "").strip()
     elements = [e.strip().lower() for e in (renovation_elements or []) if e and e.strip()]
@@ -94,6 +90,18 @@ def build_instruction_for_edit(
         f"Desired quality level: {desired_quality_level}",
         f"Target renovation style: {resolved_target_style}",
     ]
+
+    issues = [i.strip() for i in (detected_issues or []) if i and i.strip()]
+    if issues:
+        directive_lines.append(
+            "AI-detected issues/damages to repair: " + ", ".join(issues) + "."
+        )
+        directive_lines.append(
+            "Focus repairs on the above detected issues. Fix each one while preserving "
+            "all undamaged areas of the image."
+        )
+    else:
+        directive_lines.append(_NO_ISSUES_DETECTED_INSTRUCTION)
 
     if visual_type == "select_elements_to_renovate":
         if element_descriptions:
@@ -127,7 +135,7 @@ def build_instruction_for_edit(
     return "\n".join(directive_lines)
 
 
-def _read_prompt_file(path: Path, fallback: str) -> str:
+def _read_prompt_text(path: Path, fallback: str) -> str:
     if path.exists():
         content = path.read_text(encoding="utf-8").strip()
         if content:
@@ -135,23 +143,22 @@ def _read_prompt_file(path: Path, fallback: str) -> str:
     return fallback
 
 
-def _load_edit_prompt_template() -> str:
-    return _read_prompt_file(
+def _load_edit_prompt_text() -> str:
+    return _read_prompt_text(
         _EDIT_PROMPT_BASE,
         "You are editing one real-estate photo. Apply only requested visual changes.",
     )
 
 
-_BROAD_RENOVATION = _read_prompt_file(
+_BROAD_RENOVATION = _read_prompt_text(
     _EDIT_PROMPT_BROAD,
     "MODE: Full renovation / damage repair. Preserve the full frame; fix only visible damage.",
 )
-_TARGETED_CHANGE = _read_prompt_file(
+_TARGETED_CHANGE = _read_prompt_text(
     _EDIT_PROMPT_TARGETED,
     "MODE: Targeted edit only. Apply only what the user requested; keep the rest of the scene unchanged.",
 )
 
-# Targeted = user asked for a narrow change (one surface, "only", "just the wall", etc.). Compiled once.
 _TARGETED_SCOPE_RE = tuple(
     re.compile(p)
     for p in (
@@ -170,7 +177,7 @@ _TARGETED_SCOPE_RE = tuple(
 )
 
 
-def _instruction_is_targeted_scope(instruction: str) -> bool:
+def _is_targeted_edit_instruction(instruction: str) -> bool:
     """True if the user narrowed scope to a specific edit; otherwise use broad damage-repair mode."""
     t = (instruction or "").strip().lower()
     if not t:
@@ -178,8 +185,8 @@ def _instruction_is_targeted_scope(instruction: str) -> bool:
     return any(rx.search(t) for rx in _TARGETED_SCOPE_RE)
 
 
-def _constraints_for_instruction(instruction: str) -> str:
-    if _instruction_is_targeted_scope(instruction):
+def _select_constraints_for_instruction(instruction: str) -> str:
+    if _is_targeted_edit_instruction(instruction):
         return _TARGETED_CHANGE
     return _BROAD_RENOVATION
 
@@ -197,90 +204,39 @@ async def edit_property_image_from_url(
     if not instruction.strip():
         raise ValueError("instruction is required.")
 
-    image_bytes, media_type = await _download_image(image_url.strip())
-    prompt_template = _load_edit_prompt_template()
+    image_bytes, media_type = await _download_source_image(image_url.strip())
+    prompt_template = _load_edit_prompt_text()
     constraints = (
         preserve_elements.strip()
         if preserve_elements is not None
-        else _constraints_for_instruction(instruction.strip())
+        else _select_constraints_for_instruction(instruction.strip())
     )
-    prompt = (
-        f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}\n\n"
-        f"{_STRUCTURAL_PRESERVATION_RULES}"
-    )
+    prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    edit_model = settings.default_openai_image_edit_model
-    edit_kwargs = {
-        "model": edit_model,
-        "image": ("property_image.png", image_bytes, media_type),
-        "prompt": prompt,
-        "size": "auto",
-    }
-    if edit_model in {"gpt-image-1", "gpt-image-1.5"}:
-        # Preserve source-room geometry more faithfully for real-estate edits.
-        edit_kwargs["input_fidelity"] = "high"
+    response = await client.images.edit(
+        model=settings.default_openai_image_edit_model,
+        image=("property_image.png", image_bytes, media_type),
+        prompt=prompt,
+        size="auto",
+        input_fidelity="high",
+        quality="high",
+    )
 
-    try:
-        response = await client.images.edit(**edit_kwargs)
-        data = getattr(response, "data", None) or []
-        if not data or not getattr(data[0], "b64_json", None):
-            raise ValueError("Image edit failed: no image returned.")
-        first = data[0]
-        revised_prompt = getattr(first, "revised_prompt", "") or prompt
-        return ImageEditResult(
-            revised_prompt=revised_prompt,
-            image_base64=first.b64_json,
-            media_type="image/png",
-        )
-    except Exception as exc:
-        # Some projects cannot use /images/edits due model compatibility.
-        logger.warning(
-            "OpenAI image edit failed for model=%s; using generation fallback: %s",
-            edit_model,
-            exc,
-        )
-        generation_prompt = (
-            f"{prompt}\n\nSource image URL for reference: {image_url.strip()}\n"
-            "Generate a renovated version that preserves composition and layout."
-        )
-        gen_response = await client.images.generate(
-            model="gpt-image-1",
-            prompt=generation_prompt,
-            size="1024x1024",
-        )
-        gen_data = getattr(gen_response, "data", None) or []
-        if not gen_data:
-            raise ValueError("Image generation fallback returned no data.")
+    data = getattr(response, "data", None) or []
+    if not data or not getattr(data[0], "b64_json", None):
+        raise ValueError("Image edit failed: no image returned.")
 
-        first_gen = gen_data[0]
-        b64 = getattr(first_gen, "b64_json", None)
-        if b64:
-            return ImageEditResult(
-                revised_prompt=prompt,
-                image_base64=b64,
-                media_type="image/png",
-            )
-
-        generated_url = getattr(first_gen, "url", None) or ""
-        if not generated_url:
-            raise ValueError("Image generation fallback returned neither b64_json nor url.")
-
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as gen_client:
-            download = await gen_client.get(generated_url)
-            download.raise_for_status()
-        generated_media_type = (
-            download.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
-        )
-        encoded = base64.b64encode(download.content).decode("utf-8")
-        return ImageEditResult(
-            revised_prompt=prompt,
-            image_base64=encoded,
-            media_type=generated_media_type,
-        )
+    first = data[0]
+    revised_prompt = getattr(first, "revised_prompt", "") or prompt
+    return ImageEditResult(
+        revised_prompt=revised_prompt,
+        image_base64=first.b64_json,
+        media_type="image/png",
+    )
 
 
-async def _download_image(image_url: str) -> tuple[bytes, str]:
+async def _download_source_image(image_url: str) -> tuple[bytes, str]:
     cached = redis_cache.get_cached_image_download(
         image_url,
         ttl_seconds=IMAGE_CACHE_TTL_SECONDS,
@@ -291,7 +247,7 @@ async def _download_image(image_url: str) -> tuple[bytes, str]:
 
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(image_url, headers=_headers_for_image_download(image_url))
+            response = await client.get(image_url, headers=_build_image_download_headers(image_url))
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"

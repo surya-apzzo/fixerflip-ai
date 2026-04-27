@@ -14,4 +14,3 @@ Repairs:
 - Preserve original structural material: if the structure is wood framing/studs, keep it wood (do not convert to concrete/masonry look). If the structure is concrete/masonry, keep it concrete/masonry.
 - Do NOT create new walls, paneling, trim patterns, fixtures, or structural elements that were not present in the source.
 - Do not invent a different room, change the floor plan, add people, or add brand logos.
-    

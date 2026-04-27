@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import logging
 import uuid
 
 from botocore.config import Config
 
 from app.core.config import settings
+
+logger = logging.getLogger(__name__)
 
 
 def _require_storage_config() -> None:
@@ -46,9 +49,10 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
         "ContentType": content_type,
     }
     try:
-        client.put_object(**put_kwargs, ACL="public-read")
-    except Exception:
         client.put_object(**put_kwargs)
+    except Exception:
+        # Keep compatibility for providers that still require ACL.
+        client.put_object(**put_kwargs, ACL="public-read")
 
     try:
         return client.generate_presigned_url(
@@ -56,8 +60,15 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
             Params={"Bucket": settings.STORAGE_BUCKET_NAME, "Key": key},
             ExpiresIn=settings.STORAGE_PRESIGNED_URL_TTL_SECONDS,
         )
-    except Exception:
-        return _build_public_url(key)
+    except Exception as exc:
+        logger.warning("Failed to generate presigned URL for key '%s': %s", key, exc)
+        # Only return direct URL when explicitly configured as public.
+        if settings.STORAGE_PUBLIC_BASE_URL:
+            return _build_public_url(key)
+        raise ValueError(
+            "Uploaded image but failed to generate presigned download URL. "
+            "Set STORAGE_PUBLIC_BASE_URL for public objects or fix signing config."
+        ) from exc
 
 
 async def upload_base64_image_to_bucket(*, image_base64: str, media_type: str) -> str:

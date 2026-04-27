@@ -4,4 +4,3 @@ Apply ONLY what the user explicitly requested (e.g. one wall color, one material
 - Minimize changes outside the requested surfaces or objects.
 - Do not perform a full-room restoration or remove unrelated damage/debris unless the user asked for a broad renovation or cleanup.
 - Keep the rest of the scene—including plants, built-ins, and side-wall details—as close to the source as possible while making the requested change look natural.
-

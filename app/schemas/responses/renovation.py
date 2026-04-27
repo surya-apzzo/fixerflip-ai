@@ -1,15 +1,12 @@
-from pydantic import BaseModel
+from typing import List
 
-from app.schemas.responses.condition import ImageConditionResult
-from app.schemas.responses.estimate import RenovationEstimate
-
-
-class RenovatedImageResult(BaseModel):
-    renovated_image_url: str
+from pydantic import BaseModel, Field
 
 
 class RenovationEstimateResponse(BaseModel):
-    image_condition: ImageConditionResult
-    estimate: RenovationEstimate
-    renovated_image: RenovatedImageResult | None = None
-    renovated_image_error: str | None = None
+    renovation_class: str
+    estimated_renovation_range: str
+    estimated_timeline: str
+    suggested_work_items: List[str] = Field(default_factory=list)
+    confidence_score: str
+    explanation_summary: str
