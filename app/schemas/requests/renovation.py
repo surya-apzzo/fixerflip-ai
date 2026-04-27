@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from app.core.rules_config import DEFAULT_ADMIN_LABOR_INDEX, DEFAULT_ADMIN_MATERIAL_INDEX
 
@@ -30,8 +30,8 @@ class RenovationEstimateRequest(BaseModel):
     type_of_renovation: str = "interior"
     visual_type: str = "select_elements_to_renovate"
     reference_image_url: str = ""
-    renovation_elements: list[str] = []
+    renovation_elements: list[str] = Field(default_factory=list)
     condition_score: int | None = None
-    issues: list[str] = []
+    issues: list[str] = Field(default_factory=list)
     room_type: str = "unknown"
     user_inputs: str = ""

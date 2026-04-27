@@ -3,8 +3,6 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import HTTPException
-
 from app.engine.renovation_engine.image_condition_engine import ImageConditionResult
 from app.engine.renovation_engine.image_edit_engine import (
     build_instruction_for_edit,
@@ -127,13 +125,11 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
                 logger.warning("Renovated image upload failed", exc_info=upload_exc)
                 pipeline_warnings.append("Renovated image upload failed; estimate data remains available.")
     else:
-        if payload.condition_score is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Provide either image_url or condition_score fallback.",
-            )
+        manual_condition_score = payload.condition_score
+        if manual_condition_score is None:
+            raise RuntimeError("Validated renovation payload is missing condition_score.")
         image_condition = ImageConditionResult(
-            condition_score=payload.condition_score,
+            condition_score=manual_condition_score,
             issues=payload.issues,
             room_type=payload.room_type,
             analysis_status="manual_input",
