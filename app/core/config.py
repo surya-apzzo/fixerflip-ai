@@ -1,4 +1,5 @@
-from typing import List, Union
+import json
+from typing import Any, List, Union
 
 from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -44,6 +45,11 @@ class Settings(BaseSettings):
     # Set to false in production if you do not want /docs and OpenAPI exposed
     ENABLE_OPENAPI: bool = True
 
+    # Optional JSON object for request-validation overrides.
+    # Example:
+    # VALIDATION_RULE_OVERRIDES='{"sqft":{"minimum":500,"min_inclusive":true},"labor_index":{"maximum":3.0}}'
+    VALIDATION_RULE_OVERRIDES: dict[str, dict[str, Any]] = {}
+
     # Optional: OpenAI vision integration for image analysis.
     OPENAI_API_KEY: str = ""
     OPENAI_VISION_MODEL: str = "gpt-4o-mini"
@@ -58,6 +64,14 @@ class Settings(BaseSettings):
     # Optional: Referer sent when downloading MLS/CDN image URLs (some return 403 without a browser-like Referer).
     # Example: https://www.realty.com/ or the URL your CDN expects.
     IMAGE_DOWNLOAD_REFERER: str = ""
+    STORAGE_ENDPOINT_URL: str = ""
+    STORAGE_REGION: str = "auto"
+    STORAGE_BUCKET_NAME: str = ""
+    STORAGE_ACCESS_KEY_ID: str = ""
+    STORAGE_SECRET_ACCESS_KEY: str = ""
+    STORAGE_PUBLIC_BASE_URL: str = ""
+    STORAGE_RENOVATED_IMAGE_PREFIX: str = "renovated"
+    STORAGE_PRESIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
@@ -73,9 +87,51 @@ class Settings(BaseSettings):
     def normalize_openai_strings(cls, v: str | None) -> str:
         return (v or "").strip()
 
+    @field_validator("VALIDATION_RULE_OVERRIDES", mode="before")
+    @classmethod
+    def parse_validation_rule_overrides(cls, v: object) -> dict[str, dict[str, Any]]:
+        if v in (None, ""):
+            return {}
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return {}
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("VALIDATION_RULE_OVERRIDES must be valid JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("VALIDATION_RULE_OVERRIDES must decode to an object")
+            return {
+                str(field): value
+                for field, value in parsed.items()
+                if isinstance(value, dict)
+            }
+        if isinstance(v, dict):
+            return {
+                str(field): value
+                for field, value in v.items()
+                if isinstance(value, dict)
+            }
+        raise ValueError("VALIDATION_RULE_OVERRIDES must be a dict or JSON object string")
+
     @field_validator("IMAGE_DOWNLOAD_REFERER", mode="before")
     @classmethod
     def strip_image_download_referer(cls, v: str | None) -> str:
+        return (v or "").strip()
+
+    @field_validator(
+        "STORAGE_ENDPOINT_URL",
+        "STORAGE_REGION",
+        "STORAGE_BUCKET_NAME",
+        "STORAGE_ACCESS_KEY_ID",
+        "STORAGE_SECRET_ACCESS_KEY",
+        "STORAGE_PUBLIC_BASE_URL",
+        "STORAGE_RENOVATED_IMAGE_PREFIX",
+        mode="before",
+    )
+    @classmethod
+    def normalize_storage_strings(cls, v: str | None) -> str:
         return (v or "").strip()
 
     @property

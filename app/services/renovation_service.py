@@ -3,24 +3,29 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from fastapi import HTTPException
-
 from app.engine.renovation_engine.image_condition_engine import ImageConditionResult
-from app.engine.renovation_engine.image_edit_engine import build_instruction_for_edit, edit_property_image_from_url
+from app.engine.renovation_engine.image_edit_engine import (
+    build_instruction_for_edit,
+    edit_property_image_from_url,
+)
 from app.engine.renovation_engine.renovation_cost_engine import (
     RenovationEstimateInput,
     apply_user_input_cost_adjustments,
     estimate_renovation_cost,
 )
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
-from app.schemas.renovation_api import RenovatedImageResult, RenovationEstimateRequest, RenovationEstimateResponse
+from app.schemas.requests.renovation import RenovationEstimateRequest
+from app.schemas.responses.renovation import RenovationEstimateResponse
+from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
+from app.services.renovation_response_mapper import to_production_renovation_response
+from app.services.storage_service import upload_base64_image_to_bucket
 
 logger = logging.getLogger(__name__)
 
 _PUBLIC_IMAGE_EDIT_ERROR = "Image edit failed. Retry later or inspect server logs."
 
 
-def _resolve_target_renovation_style(payload: RenovationEstimateRequest) -> str:
+def _resolve_target_style(payload: RenovationEstimateRequest) -> str:
     if payload.target_renovation_style and payload.target_renovation_style != "investor_standard":
         return payload.target_renovation_style
     if payload.visual_type == "upload_my_own_reference_photo" and payload.reference_image_url:
@@ -34,7 +39,7 @@ def _resolve_target_renovation_style(payload: RenovationEstimateRequest) -> str:
     return payload.target_renovation_style
 
 
-def _build_estimate_input(
+def _build_renovation_estimate_input(
     payload: RenovationEstimateRequest,
     *,
     image_condition: ImageConditionResult,
@@ -70,11 +75,12 @@ def _build_estimate_input(
 
 
 async def build_renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
-    renovated_image: RenovatedImageResult | None = None
-    renovated_image_error: str | None = None
+    payload = validate_and_normalize_renovation_payload(payload)
+    pipeline_warnings: list[str] = []
+    renovated_image_url: str | None = None
 
     if payload.image_url:
-        resolved_target_style = _resolve_target_renovation_style(payload)
+        resolved_target_style = _resolve_target_style(payload)
         instruction_for_edit = build_instruction_for_edit(
             user_inputs=payload.user_inputs,
             type_of_renovation=payload.type_of_renovation,
@@ -94,7 +100,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         )
 
         if isinstance(vision_result, Exception):
-            logger.warning("Renovation vision analysis failed: %s", vision_result)
+            logger.warning("Renovation vision analysis failed", exc_info=vision_result)
             image_condition = ImageConditionResult(
                 condition_score=65,
                 issues=[],
@@ -102,32 +108,37 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
                 analysis_status="fallback",
                 fallback_reason="vision_request_failed",
             )
+            pipeline_warnings.append("Vision analysis failed; estimate used fallback condition inputs.")
         else:
             image_condition = vision_result
 
         if isinstance(edit_result, Exception):
-            logger.warning("Renovation image edit failed: %s", edit_result)
-            renovated_image_error = str(edit_result) if isinstance(edit_result, ValueError) else _PUBLIC_IMAGE_EDIT_ERROR
+            logger.warning("Renovation image edit failed", exc_info=edit_result)
+            error_message = str(edit_result) if isinstance(edit_result, ValueError) else _PUBLIC_IMAGE_EDIT_ERROR
+            pipeline_warnings.append(error_message)
         else:
-            renovated_image = RenovatedImageResult(
-                renovated_image_url=f"data:{edit_result.media_type};base64,{edit_result.image_base64}",
-            )
+            try:
+                renovated_image_url = await upload_base64_image_to_bucket(
+                    image_base64=edit_result.image_base64,
+                    media_type=edit_result.media_type,
+                )
+            except Exception as upload_exc:
+                logger.warning("Renovated image upload failed", exc_info=upload_exc)
+                pipeline_warnings.append("Renovated image upload failed; estimate data remains available.")
     else:
-        if payload.condition_score is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Provide either image_url or condition_score fallback.",
-            )
+        manual_condition_score = payload.condition_score
+        if manual_condition_score is None:
+            raise RuntimeError("Validated renovation payload is missing condition_score.")
         image_condition = ImageConditionResult(
-            condition_score=payload.condition_score,
+            condition_score=manual_condition_score,
             issues=payload.issues,
             room_type=payload.room_type,
             analysis_status="manual_input",
             fallback_reason="manual_condition_score",
         )
-        resolved_target_style = _resolve_target_renovation_style(payload)
+        resolved_target_style = _resolve_target_style(payload)
 
-    estimate_input = _build_estimate_input(
+    estimate_input = _build_renovation_estimate_input(
         payload,
         image_condition=image_condition,
         resolved_target_style=resolved_target_style,
@@ -153,17 +164,20 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
             renovation_elements=payload.renovation_elements,
         )
 
-    if image_condition.analysis_status != "ai_success":
-        fallback_note = f"Condition source: {image_condition.analysis_status}"
-        if image_condition.fallback_reason:
-            fallback_note += f" ({image_condition.fallback_reason})."
+    analysis_status = getattr(image_condition, "analysis_status", "ai_success")
+    fallback_reason = getattr(image_condition, "fallback_reason", None)
+    if analysis_status != "ai_success":
+        fallback_note = f"Condition source: {analysis_status}"
+        if fallback_reason:
+            fallback_note += f" ({fallback_reason})."
         else:
             fallback_note += "."
         estimate = estimate.model_copy(update={"assumptions": [*estimate.assumptions, fallback_note]})
 
-    return RenovationEstimateResponse(
-        image_condition=image_condition,
-        estimate=estimate,
-        renovated_image=renovated_image,
-        renovated_image_error=renovated_image_error,
+    if pipeline_warnings:
+        estimate = estimate.model_copy(update={"assumptions": [*estimate.assumptions, *pipeline_warnings]})
+
+    return to_production_renovation_response(
+        estimate,
+        renovated_image_url=renovated_image_url,
     )

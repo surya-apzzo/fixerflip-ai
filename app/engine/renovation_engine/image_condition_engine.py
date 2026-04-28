@@ -1,6 +1,5 @@
 """
 Image Condition AI — renovation engine.
-
 Converts vision-detected issues into a 0–100 condition score and normalized output.
 """
 
@@ -23,45 +22,66 @@ NORMALIZED_ISSUES = {
     "dated kitchen": "outdated cabinets",
     "dated cabinets": "outdated cabinets",
     "kitchen cabinets": "outdated cabinets",
+    "dated flooring": "outdated flooring",
     "dirty walls": "stains",
     "wall stains": "stains",
     "old bathroom": "old bathroom",
     "dated bathroom tile": "old tiles",
     "outdated bathroom": "old bathroom",
     "roof wear": "roof damage",
-    "structural crack": "foundation cracks",
-    "crack": "foundation cracks",
+    #a: generic "crack" alone is minor wall damage, not foundation
+    "structural crack": "major wall cracks",
+    "crack": "minor wall damage",
     "damaged flooring": "floor damage",
     "visible gaps between planks": "floor damage",
     "major crack": "major wall cracks",
     "major wall crack": "major wall cracks",
-    "foundation crack": "foundation cracks",
+    # b: "foundation cracks" is not in the prompt allowed list.
+    # Closest canonical allowed type is "major wall cracks".
+    "foundation crack": "major wall cracks",
+    "foundation cracks": "major wall cracks",
     "structural issues": "structural damage",
-    "plumbing issue": "plumbing issues",
-    "electrical issue": "electrical issues",
-    "hvac issue": "hvac issues",
-    "old hvac": "hvac issues",
+    "plumbing issue": "water damage",
+    "electrical issue": "minor wall damage",
+    "hvac issue": "minor wall damage",
+    "old hvac": "minor wall damage",
     "ceiling popcorn": "popcorn ceiling",
     "popcorn ceilings": "popcorn ceiling",
-    "old appliances": "worn appliances",
-    "worn appliance": "worn appliances",
-    "dirty surface": "dirty surfaces",
+    "ceiling damage": "damaged ceiling",
+    "ceiling crack": "damaged ceiling",
+    "grout missing": "missing grout",
+    "missing tile grout": "missing grout",
+    "dirty tile grout": "dirty grout",
+    "wood rot": "rotted wood",
+    "rotting wood": "rotted wood",
+    "broken fixture": "broken fixtures",
+    "fixture damage": "broken fixtures",
+    "appliance damage": "damaged appliances",
+    "damaged appliance": "damaged appliances",
+    "old appliances": "stains",
+    "worn appliance": "stains",
+    "dirty surface": "stains",
     "peeling paint": "peeling exterior paint",
     "exterior peeling paint": "peeling exterior paint",
     "broken window": "broken windows",
-    "smoke damage": "structural damage",
-    "fire damage": "structural damage",
-    "charred walls": "structural damage",
-    "burn marks": "major wall cracks",
+    # c: smoke and fire map to their own canonical types, NOT structural damage
+    "smoke damage": "smoke damage",
+    "fire damage": "fire damage",
+    "charred walls": "fire damage",
+    "burn marks": "smoke damage",
     "soot": "smoke damage",
+    # True structural defects only
+    "exposed framing": "structural damage",
+    "collapsed ceiling": "structural damage",
+    "missing wall section": "structural damage",
 }
 
 
 # Severity multiplier
 SEVERITY_MULTIPLIER = {
-    "minor": 0.5,
+    "minor": 0.7,
     "moderate": 1.0,
-    "severe": 1.7,
+    "severe": 1.4,
 }
 
 # Prevents dozens of low-weight detections from driving the score to ~0 (model over-listing).
@@ -72,13 +92,19 @@ POSITIVE_WEIGHTS = {
     "modern kitchen": 10,
     "updated kitchen": 8,
     "renovated bathroom": 12,
+    "modern bathroom": 10,
     "updated bathroom": 9,
     "hardwood floor": 8,
     "new flooring": 7,
+    "updated flooring": 7,
     "fresh paint": 5,
     "new paint": 5,
     "good lighting": 4,
+    "good natural light": 4,
     "recessed lighting": 6,
+    "updated fixtures": 5,
+    "new appliances": 6,
+    "clean condition": 5,
     "new roof": 15,
     "new hvac": 14,
     "new windows": 10,
@@ -89,38 +115,42 @@ POSITIVE_WEIGHTS = {
 
 # Positive Aliases
 POSITIVE_ALIASES = {
-    # Kitchen
     "remodeled kitchen": "modern kitchen",
     "updated kitchen": "updated kitchen",
     "gourmet kitchen": "modern kitchen",
-
-    # Bathroom
     "updated bath": "updated bathroom",
+    "modern bath": "modern bathroom",
     "remodeled bathroom": "renovated bathroom",
-
-    # Flooring
     "hardwood flooring": "hardwood floor",
     "wood floors": "hardwood floor",
     "new floors": "new flooring",
-
-    # Paint
+    "updated floors": "updated flooring",
     "freshly painted": "fresh paint",
     "recent paint": "new paint",
-
-    # Condition
+    "natural light": "good natural light",
+    "daylight": "good natural light",
+    "updated light fixtures": "updated fixtures",
+    "updated hardware": "updated fixtures",
+    "new appliance": "new appliances",
+    "clean interior": "clean condition",
+    "clean room": "clean condition",
     "move in ready": "move-in ready",
     "fully updated": "turnkey",
     "fully renovated": "turnkey",
 }
 
-# Taxonomy used for validation of vision output (single source of truth for weights).
+
 CANONICAL_POSITIVE_TYPES: frozenset[str] = frozenset(POSITIVE_WEIGHTS.keys())
 
-# Overall room condition from the model (new | average | old). Applied after issue penalties.
+
 CONDITION_SCORE_ADJUSTMENT: dict[str, float] = {
-    "new": 4.0,
+    "new": 8.0,
+    "good": 4.0,
+    "fair": 0.0,
     "average": 0.0,
+    "poor": -12.0,
     "old": -12.0,
+    "distressed": -18.0,
 }
 
 # Room Weights
@@ -132,6 +162,7 @@ ROOM_WEIGHTS = {
     "hall": 0.20,
     "bedroom": 0.10,
     "exterior": 0.15,
+    "basement": 0.10,
     "other": 0.10,
     "unknown": 0.10,
 }
@@ -149,6 +180,7 @@ ROOM_ALIASES = {
     "bathroom": "bathroom",
     "bath": "bathroom",
     "living": "living_room",
+    "basement": "basement",
 }
 
 __all__ = [
@@ -166,8 +198,7 @@ class ImageConditionEngine:
         return NORMALIZED_ISSUES.get(key, key)
 
     def confidence_adjust(self, conf: float) -> float:
-        # range: 0.5 -> 1.0
-        return 0.5 + (_clamp(conf, 0.0, 1.0) * 0.5)
+        return 0.3 + (_clamp(conf, 0.0, 1.0) * 0.7)
 
     def normalize_room(self, room: str) -> str:
         key = re.sub(r"\s+", " ", (room or "unknown").strip().lower())
@@ -177,7 +208,6 @@ class ImageConditionEngine:
         key = re.sub(r"\s+", " ", (label or "").strip().lower())
         return POSITIVE_ALIASES.get(key, key)
 
-    # Calculate the room score from the room detection.
     def calculate_room_score(self, data: RoomDetection) -> float:
         """
         Start from 100, subtract capped weighted issue penalties, apply model `condition`
@@ -195,9 +225,9 @@ class ImageConditionEngine:
         total_penalty = min(total_penalty, MAX_ISSUE_PENALTY_PER_IMAGE)
         score = 100.0 - total_penalty
 
-        cond = (data.condition or "average").strip().lower()
+        cond = (data.condition or "fair").strip().lower()
         if cond not in CONDITION_SCORE_ADJUSTMENT:
-            cond = "average"
+            cond = "fair"
         score += CONDITION_SCORE_ADJUSTMENT[cond]
 
         for p in data.positives:
@@ -207,31 +237,6 @@ class ImageConditionEngine:
 
         return _clamp(score, 0.0, 100.0)
 
-    # Calculate the room score from the issues.
-    def score_from_issues(
-        self, issues: List[str], room_type: str = "unknown"
-    ) -> ImageConditionResult:
-        
-        normalized_issues = [
-            self.normalize_issue(i) for i in issues if i and str(i).strip()
-        ]
-        normalized_room = self.normalize_room(room_type)
-        room_data = RoomDetection(
-            room=normalized_room,
-            issues=[
-                IssueDetection(type=i, severity="moderate", confidence=1.0)
-                for i in normalized_issues
-            ],
-            positives=[],
-        )
-        score = int(round(self.calculate_room_score(room_data)))
-        return ImageConditionResult(
-            condition_score=score,
-            issues=normalized_issues,
-            room_type=normalized_room,
-        )
-
-    # Calculate the room score from the room detections.
     def score_from_room_detections(
         self, detections: List[RoomDetection]
     ) -> ImageConditionResult:
@@ -242,13 +247,23 @@ class ImageConditionEngine:
 
         room_scores: dict[str, list[float]] = defaultdict(list)
         all_issues: list[str] = []
+        all_issue_details: list[IssueDetection] = []
         seen_issues: set[str] = set()
+        issue_counts: dict[str, int] = defaultdict(int)
 
         for d in detections:
             room = self.normalize_room(d.room)
             room_scores[room].append(self.calculate_room_score(d))
             for issue in d.issues:
                 n = self.normalize_issue(issue.type)
+                severity = issue.severity.strip().lower() or "moderate"
+                confidence = _clamp(issue.confidence, 0.0, 1.0)
+
+                all_issue_details.append(
+                    IssueDetection(type=n, severity=severity, confidence=confidence)
+                )
+                issue_counts[n] = issue_counts.get(n, 0) + 1
+
                 if n not in seen_issues:
                     seen_issues.add(n)
                     all_issues.append(n)
@@ -267,7 +282,11 @@ class ImageConditionEngine:
         final = int(round(_clamp(final, 0.0, 100.0)))
         if not room_scores:
             return ImageConditionResult(
-                condition_score=final, issues=all_issues, room_type="unknown"
+                condition_score=final,
+                issues=all_issues,
+                issue_details=all_issue_details,
+                issue_counts=issue_counts,
+                room_type="unknown"
             )
 
         ranked_rooms = sorted(
@@ -279,7 +298,11 @@ class ImageConditionEngine:
             ranked_rooms[0] if len(ranked_rooms) == 1 else ",".join(ranked_rooms)
         )
         return ImageConditionResult(
-            condition_score=final, issues=all_issues, room_type=room_type
+            condition_score=final,
+            issues=all_issues,
+            issue_details=all_issue_details,
+            issue_counts=issue_counts,
+            room_type=room_type,
         )
 
 

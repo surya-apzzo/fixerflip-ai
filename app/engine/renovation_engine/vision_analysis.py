@@ -32,21 +32,23 @@ logger = logging.getLogger(__name__)
 
 _PROMPT_PATH = Path(__file__).resolve().parent.parent.parent / "prompts" / "renovation_image_condition_prompt.txt"
 ALLOWED_SEVERITY = frozenset({"minor", "moderate", "severe"})
-VALID_CONDITION = frozenset({"new", "average", "old"})
+
+# FIX 1: expanded to cover both old and new prompt condition labels
+VALID_CONDITION = frozenset({"new", "good", "fair", "poor", "distressed", "average", "old"})
+
 MAX_ISSUES_PER_IMAGE = 8
 _SEVERITY_RANK = {"severe": 0, "moderate": 1, "minor": 2}
 _VISION_FALLBACK_SCORE = 65
 _VISION_MAX_RETRIES = 2
 _VISION_RETRY_BACKOFF_SECONDS = 0.75
 
-# Reasons for fallback
 _VISION_DISABLED_REASON = "vision_unavailable"
 _VISION_INVALID_OUTPUT_REASON = "invalid_model_output"
 _VISION_REQUEST_FAILED_REASON = "vision_request_failed"
 _VISION_EMPTY_IMAGE_URL_REASON = "empty_image_url"
 
 
-def _load_prompt() -> str:
+def _load_condition_prompt() -> str:
     if _PROMPT_PATH.exists():
         return _PROMPT_PATH.read_text(encoding="utf-8").strip()
     return (
@@ -55,16 +57,14 @@ def _load_prompt() -> str:
     )
 
 
-def _is_retryable_openai_error(exc: Exception) -> bool:
-    # Avoid tight coupling to OpenAI exception classes; class names are stable enough for retry gating.
+def _is_retryable_openai_exception(exc: Exception) -> bool:
     retryable_names = {"RateLimitError", "APIConnectionError", "APITimeoutError", "InternalServerError"}
     return exc.__class__.__name__ in retryable_names
 
 
-async def _sleep_with_backoff(attempt: int) -> None:
+async def _wait_for_retry_backoff(attempt: int) -> None:
     await asyncio.sleep(_VISION_RETRY_BACKOFF_SECONDS * (2**attempt))
 
-# This function is used in the renovation estimate endpoint.
 
 async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None, str | None, str | None]:
     """One image URL -> structured room detection via OpenAI."""
@@ -72,12 +72,15 @@ async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None
         return None, _VISION_DISABLED_REASON, None
 
     primary_model = settings.default_openai_vision_model
-    fallback_model = "gpt-4o-mini"
+    fallback_model = (settings.OPENAI_MODEL or "gpt-4o-mini").strip().lower()
+    model_candidates = [primary_model]
+    if fallback_model and fallback_model not in model_candidates:
+        model_candidates.append(fallback_model)
     try:
-        prompt = _load_prompt()
+        prompt = _load_condition_prompt()
         client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
         last_failed_model: str | None = None
-        for model_name in [primary_model, fallback_model]:
+        for model_name in model_candidates:
             for attempt in range(_VISION_MAX_RETRIES + 1):
                 try:
                     response = await client.responses.create(
@@ -95,14 +98,14 @@ async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None
                     )
                     raw = getattr(response, "output_text", None) or ""
                     try:
-                        parsed = _parse_json_response(raw)
+                        parsed = _parse_response_json(raw)
                     except ValueError:
                         logger.warning("Vision returned invalid JSON for URL %s", image_url)
                         return None, _VISION_INVALID_OUTPUT_REASON, model_name
                     if not isinstance(parsed, dict):
                         logger.warning("Vision returned non-object JSON for URL %s", image_url)
                         return None, _VISION_INVALID_OUTPUT_REASON, model_name
-                    return _parse_room_detection(parsed), None, model_name
+                    return _parse_room_analysis(parsed), None, model_name
                 except Exception as exc:
                     last_failed_model = model_name
                     logger.warning(
@@ -113,8 +116,8 @@ async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None
                         _VISION_MAX_RETRIES + 1,
                         exc,
                     )
-                    if attempt < _VISION_MAX_RETRIES and _is_retryable_openai_error(exc):
-                        await _sleep_with_backoff(attempt)
+                    if attempt < _VISION_MAX_RETRIES and _is_retryable_openai_exception(exc):
+                        await _wait_for_retry_backoff(attempt)
                         continue
                     break
         return None, _VISION_REQUEST_FAILED_REASON, last_failed_model or primary_model
@@ -123,12 +126,11 @@ async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None
         return None, _VISION_REQUEST_FAILED_REASON, primary_model
 
 
-# This function is used in the renovation estimate endpoint.
 async def analyze_renovation_image_url(image_url: str) -> ImageConditionResult:
     """Single image URL -> condition result (renovation flow uses one image at a time)."""
     url = (image_url or "").strip()
     if not url:
-        return _fallback_image_condition_result(_VISION_EMPTY_IMAGE_URL_REASON)
+        return _build_fallback_condition_result(_VISION_EMPTY_IMAGE_URL_REASON)
 
     engine = ImageConditionEngine()
     one, fallback_reason, model_name = await analyze_single_image_url(url)
@@ -141,10 +143,10 @@ async def analyze_renovation_image_url(image_url: str) -> ImageConditionResult:
             }
         )
 
-    return _fallback_image_condition_result(fallback_reason or _VISION_REQUEST_FAILED_REASON, model_name)
+    return _build_fallback_condition_result(fallback_reason or _VISION_REQUEST_FAILED_REASON, model_name)
 
-# Fallback function for the renovation estimate endpoint.
-def _fallback_image_condition_result(reason: str, model_name: str | None = None) -> ImageConditionResult:
+
+def _build_fallback_condition_result(reason: str, model_name: str | None = None) -> ImageConditionResult:
     return ImageConditionResult(
         condition_score=_VISION_FALLBACK_SCORE,
         issues=[],
@@ -155,28 +157,27 @@ def _fallback_image_condition_result(reason: str, model_name: str | None = None)
     )
 
 
-def _safe_float(v: Any, default: float) -> float:
+def _to_float_or_default(v: Any, default: float) -> float:
     try:
         return float(v)
     except (TypeError, ValueError):
         return default
 
 
-def _normalize_severity(value: str) -> str:
+def _normalize_issue_severity(value: str) -> str:
     s = (value or "moderate").strip().lower()
     return s if s in ALLOWED_SEVERITY else "moderate"
 
 
-def _normalize_condition(value: Any) -> str:
+def _normalize_condition_label(value: Any) -> str:
     condition = str(value or "average").strip().lower()
+    # FIX 1: now accepts all valid condition labels from both old and new prompt
     if condition not in VALID_CONDITION:
         return "average"
     return condition
 
 
-# parse issues from the vision analysis.
-
-def _parse_issues(engine: ImageConditionEngine, issues_raw: Any) -> list[IssueDetection]:
+def _parse_issue_detections(engine: ImageConditionEngine, issues_raw: Any) -> list[IssueDetection]:
     if not isinstance(issues_raw, list):
         issues_raw = []
 
@@ -190,8 +191,8 @@ def _parse_issues(engine: ImageConditionEngine, issues_raw: Any) -> list[IssueDe
             if canonical not in CANONICAL_ISSUE_TYPES:
                 logger.warning("Vision issue label not in catalog, ignored: %s", issue_type)
                 continue
-            severity = _normalize_severity(str(item.get("severity") or "moderate"))
-            conf = _safe_float(item.get("confidence"), 0.8)
+            severity = _normalize_issue_severity(str(item.get("severity") or "moderate"))
+            conf = _to_float_or_default(item.get("confidence"), 0.8)
             issues.append(
                 IssueDetection(
                     type=canonical,
@@ -212,9 +213,85 @@ def _parse_issues(engine: ImageConditionEngine, issues_raw: Any) -> list[IssueDe
     return issues[:MAX_ISSUES_PER_IMAGE]
 
 
-# parse positives from the vision analysis.
 
-def _parse_positives(engine: ImageConditionEngine, positives_raw: Any) -> list[PositiveDetection]:
+
+def _upsert_issue(
+    issues: list[IssueDetection],
+    *,
+    issue_type: str,
+    severity: str,
+    confidence: float,
+) -> None:
+    for idx, existing in enumerate(issues):
+        if existing.type != issue_type:
+            continue
+        merged_severity = severity
+        if _SEVERITY_RANK.get(existing.severity, 1) < _SEVERITY_RANK.get(severity, 1):
+            merged_severity = existing.severity
+        merged_confidence = max(existing.confidence, confidence)
+        issues[idx] = IssueDetection(
+            type=issue_type,
+            severity=merged_severity,
+            confidence=merged_confidence,
+        )
+        return
+    issues.append(
+        IssueDetection(
+            type=issue_type,
+            severity=severity,
+            confidence=max(0.0, min(1.0, confidence)),
+        )
+    )
+
+
+def _enrich_fire_scene_issues(room: str, issues: list[IssueDetection]) -> list[IssueDetection]:
+    issue_types = {i.type for i in issues}
+    has_fire_or_smoke = "fire damage" in issue_types or "smoke damage" in issue_types
+    if not has_fire_or_smoke:
+        return issues
+
+    if "damaged ceiling" not in issue_types:
+        _upsert_issue(
+            issues,
+            issue_type="damaged ceiling",
+            severity="severe",
+            confidence=0.75,
+        )
+    if "minor wall damage" not in issue_types:
+        _upsert_issue(
+            issues,
+            issue_type="minor wall damage",
+            severity="severe",
+            confidence=0.7,
+        )
+    if room == "kitchen" and "outdated cabinets" not in issue_types:
+        _upsert_issue(
+            issues,
+            issue_type="outdated cabinets",
+            severity="severe",
+            confidence=0.7,
+        )
+    if "electrical issues" not in issue_types:
+        _upsert_issue(
+            issues,
+            issue_type="electrical issues",
+            severity="severe",
+            confidence=0.68,
+        )
+    if room in {"kitchen", "bathroom"} and "plumbing issues" not in issue_types:
+        _upsert_issue(
+            issues,
+            issue_type="plumbing issues",
+            severity="moderate",
+            confidence=0.55,
+        )
+
+    issues.sort(
+        key=lambda i: (_SEVERITY_RANK.get(i.severity, 1), -i.confidence),
+    )
+    return issues[:MAX_ISSUES_PER_IMAGE]
+
+def _parse_positive_detections(engine: ImageConditionEngine, positives_raw: Any) -> list[PositiveDetection]:
     if not isinstance(positives_raw, list):
         positives_raw = []
 
@@ -228,7 +305,7 @@ def _parse_positives(engine: ImageConditionEngine, positives_raw: Any) -> list[P
             if canonical_pos not in CANONICAL_POSITIVE_TYPES:
                 logger.warning("Vision positive label not in catalog, ignored: %s", pos_type)
                 continue
-            conf = _safe_float(item.get("confidence"), 0.8)
+            conf = _to_float_or_default(item.get("confidence"), 0.8)
             positives.append(
                 PositiveDetection(type=canonical_pos, confidence=max(0.0, min(1.0, conf)))
             )
@@ -240,17 +317,49 @@ def _parse_positives(engine: ImageConditionEngine, positives_raw: Any) -> list[P
             positives.append(PositiveDetection(type=canonical_pos, confidence=0.8))
     return positives
 
-# parse room detection from the vision analysis.
-def _parse_room_detection(parsed: dict) -> RoomDetection:
+
+def _parse_room_analysis(parsed: dict) -> RoomDetection:
     engine = ImageConditionEngine()
     room = engine.normalize_room(str(parsed.get("room") or parsed.get("room_type") or "unknown"))
-    condition = _normalize_condition(parsed.get("condition"))
-    issues = _parse_issues(engine, parsed.get("issues") or [])
-    positives = _parse_positives(engine, parsed.get("positives") or [])
-    return RoomDetection(room=room or "unknown", condition=condition, issues=issues, positives=positives)
+    condition = _normalize_condition_label(parsed.get("condition"))
+    issues = _parse_issue_detections(engine, parsed.get("issues") or [])
+    issues = _enrich_fire_scene_issues(room, issues)
+    positives = _parse_positive_detections(engine, parsed.get("positives") or [])
 
-# parse JSON response from the vision analysis.
-def _parse_json_response(text: str) -> Any:
+    # FIX 2: extract overall_score from model output and pass through to RoomDetection
+    # This uses the model's own score signal instead of throwing it away.
+    # Only applied if RoomDetection schema supports overall_score field.
+    overall_score_raw = parsed.get("overall_score") or parsed.get("score")
+    try:
+        overall_score = int(overall_score_raw) if overall_score_raw is not None else None
+        if overall_score is not None:
+            overall_score = max(1, min(10, overall_score))
+    except (TypeError, ValueError):
+        overall_score = None
+
+    # FIX 3: extract renovation_scope hint from model output
+    renovation_scope = str(parsed.get("renovation_scope") or "").strip().lower() or None
+    valid_scopes = {"cosmetic", "moderate", "heavy", "gut"}
+    if renovation_scope not in valid_scopes:
+        renovation_scope = None
+
+    # Build kwargs conditionally so we don't break schema if fields are not yet added
+    extra_kwargs: dict = {}
+    if overall_score is not None:
+        extra_kwargs["overall_score"] = overall_score
+    if renovation_scope is not None:
+        extra_kwargs["renovation_scope"] = renovation_scope
+
+    return RoomDetection(
+        room=room or "unknown",
+        condition=condition,
+        issues=issues,
+        positives=positives,
+        **extra_kwargs,
+    )
+
+
+def _parse_response_json(text: str) -> Any:
     """Parse model output: strict JSON, or extract JSON from markdown / prose."""
     text = (text or "").strip()
     if not text:
@@ -273,5 +382,3 @@ def _parse_json_response(text: str) -> Any:
         except json.JSONDecodeError:
             pass
     raise ValueError("could not parse JSON from model output")
-
-

@@ -1,4 +1,5 @@
-from typing import List, Literal
+from typing import Dict, List, Literal
+
 from pydantic import BaseModel, Field
 
 
@@ -11,23 +12,15 @@ class ImageConditionResult(BaseModel):
         default="unknown",
         description="Primary room/area: kitchen, bathroom, exterior, living, bedroom, other",
     )
-    analysis_status: Literal["ai_success", "fallback", "manual_input"] = Field(
-        default="fallback",
-        description="Whether the result came from AI, service fallback, or caller-provided manual input.",
-    )
-    model_used: str | None = Field(
-        default=None,
-        description="Model name used for AI-generated results when available.",
-    )
-    fallback_reason: str | None = Field(
-        default=None,
-        description="Reason a non-AI fallback/manual result was returned.",
+    issue_details: List["IssueDetection"] = Field(
+        default_factory=list,
+        description="Structured issue detections including type, severity, and confidence.",
     )
 
 
 class IssueDetection(BaseModel):
     type: str
-    severity: str = "moderate"  # minor | moderate | severe
+    severity: str = "moderate"
     confidence: float = Field(default=0.8, ge=0.0, le=1.0)
 
 
