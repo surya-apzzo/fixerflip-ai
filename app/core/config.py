@@ -14,7 +14,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "local"
     DEBUG: bool = False
 
-    LOG_LEVEL: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    LOG_LEVEL: str = Field(default="CRITICAL", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
     LOG_JSON: bool = Field(
         default=False,
         description="Emit JSON logs (recommended in production behind log aggregators)",

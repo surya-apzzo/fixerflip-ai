@@ -40,6 +40,10 @@ def setup_logging() -> None:
         )
     root.addHandler(handler)
 
-    # Reduce noise from libraries in production
-    if settings.is_production:
-        logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    # Keep terminal output quiet by default.
+    logging.getLogger("uvicorn").setLevel(logging.CRITICAL)
+    logging.getLogger("uvicorn.access").setLevel(logging.CRITICAL)
+    logging.getLogger("uvicorn.error").setLevel(logging.CRITICAL)
+    logging.getLogger("httpx").setLevel(logging.CRITICAL)
+    logging.getLogger("httpcore").setLevel(logging.CRITICAL)
+    logging.getLogger("openai").setLevel(logging.CRITICAL)

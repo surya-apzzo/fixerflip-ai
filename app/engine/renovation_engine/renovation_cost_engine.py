@@ -34,12 +34,20 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
     combined_factor = severity_factor * quality_factor * issue_factor * location_factor
     combined_factor = _clamp(combined_factor, 0.85, 1.9)
 
-    
 
-    line_items = _build_cost_line_items(data, combined_factor)
+
+    user_scope_categories = _build_user_scope_categories(
+        data.user_inputs,
+        data.renovation_elements,
+    )
+    line_items = _build_cost_line_items(
+        data,
+        combined_factor,
+        user_scope_categories=user_scope_categories,
+    )
     subtotal_low = sum(item.cost_low for item in line_items)
     subtotal_high = sum(item.cost_high for item in line_items)
-    
+
 
     overhead_low = subtotal_low * 0.12
     overhead_high = subtotal_high * 0.15
@@ -58,7 +66,7 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
     total_high = int(round(subtotal_high + overhead_high + contingency_high))
     if total_low > total_high:
         total_low, total_high = total_high, total_low
-    
+
 
     gap_signal = compute_gap_score(
         listing_price=data.listing_price,
@@ -85,12 +93,23 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
         age_score_points=age_signal.score_points,
     )
     selected_work_items = _build_selected_work_items(data.renovation_elements)
-    suggested_work_items = selected_work_items or _build_suggested_work_items(data.issues, data.room_type)
+    user_work_items = _build_user_scope_work_items(user_scope_categories)
+    issue_work_items = _build_suggested_work_items(data.issues, data.room_type)
+    if selected_work_items:
+        suggested_work_items = selected_work_items
+    elif data.issues and user_work_items:
+        # For damaged properties, user-requested upgrades are additive and must not hide remediation scope.
+        suggested_work_items = _deduplicate_work_items([*issue_work_items, *user_work_items])
+    elif user_work_items:
+        suggested_work_items = user_work_items
+    else:
+        suggested_work_items = issue_work_items
     impacted_elements, impacted_element_details = _build_impacted_element_outputs(
         data.room_type,
         data.issues,
         suggested_work_items,
         selected_elements=data.renovation_elements,
+        user_scope_categories=user_scope_categories,
     )
     explanation_summary = _build_explanation_summary(
         renovation_class=renovation_class,
@@ -98,7 +117,9 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
         issues=data.issues,
         desired_quality_level=data.desired_quality_level,
         impacted_elements=impacted_elements,
+        suggested_work_items=suggested_work_items,
         selected_elements=data.renovation_elements,
+        user_scope_categories=user_scope_categories,
     )
 
     assumptions = [
@@ -164,7 +185,24 @@ _SELECTED_ELEMENT_TO_IMPACTED_LABEL: dict[str, str] = {
 
 INTENT_MAP = {
     "paint": ["paint", "repaint", "wall color", "wall finish", "new paint"],
-    "flooring": ["flooring", "wood floor", "laminate", "vinyl", "carpet", "new flooring"],
+    "flooring": [
+        "flooring",
+        "floor",
+        "wood floor",
+        "laminate",
+        "vinyl",
+        "carpet",
+        "tile floor",
+        "floor tile",
+        "floor tiles",
+        "tile flooring",
+        "tiles",
+        "new flooring",
+        "replace floor",
+        "replace flooring",
+        "replace tile",
+        "replace tiles",
+    ],
     "kitchen": ["kitchen remodel", "kitchen renovation", "new kitchen", "upgrade kitchen", "new kitchen cabinets"],
     "bathroom": ["bathroom remodel", "bathroom renovation", "bath upgrade", "new bathroom"],
     "window": ["window", "windows", "window replacement", "window upgrade", "new window"],
@@ -222,6 +260,40 @@ _SCOPE_SEVERITY_TERMS = (
     "fire",
     "smoke",
 )
+
+_CATEGORY_TO_USER_WORK_ITEM: dict[str, str] = {
+    "paint": "paint renovation",
+    "flooring": "flooring renovation",
+    "kitchen": "kitchen renovation",
+    "bathroom": "bathroom renovation",
+    "window": "window renovation",
+    "roof": "roof renovation",
+    "foundation": "foundation renovation",
+    "electrical": "electrical renovation",
+    "plumbing": "plumbing renovation",
+    "hvac": "hvac renovation",
+    "exterior": "exterior renovation",
+    "doors": "doors renovation",
+    "garage": "garage renovation",
+    "landscaping": "landscaping renovation",
+}
+
+_CATEGORY_TO_IMPACTED_LABEL: dict[str, str] = {
+    "paint": "paint finish",
+    "flooring": "flooring",
+    "kitchen": "kitchen surfaces",
+    "bathroom": "bathroom surfaces",
+    "window": "windows",
+    "roof": "roofline",
+    "foundation": "foundation surfaces",
+    "electrical": "electrical fixtures",
+    "plumbing": "plumbing fixtures",
+    "hvac": "hvac",
+    "exterior": "siding",
+    "doors": "doors",
+    "garage": "garage",
+    "landscaping": "landscaping",
+}
 
 
 def _text_has_term(text: str, term: str) -> bool:
@@ -336,6 +408,43 @@ def _build_user_scope_text(
         if (key := str(raw).strip().lower()) in _ELEMENT_SELECTION_SCOPE_PHRASES
     ]
     return " ".join([(user_inputs or "").strip(), *phrases]).strip().lower()
+
+
+def _build_user_scope_categories(
+    user_inputs: str,
+    renovation_elements: List[str] | None,
+) -> list[str]:
+    selected_scope = _map_selected_elements_to_scope(renovation_elements or [])
+    intent_scope = list(set(_detect_scope_intents(_build_user_scope_text(user_inputs, renovation_elements))))
+    merged = [*selected_scope, *intent_scope]
+    deduped: list[str] = []
+    seen: set[str] = set()
+    for item in merged:
+        if item in seen:
+            continue
+        seen.add(item)
+        deduped.append(item)
+    return deduped
+
+
+def infer_user_scope_categories(
+    user_inputs: str,
+    renovation_elements: List[str] | None = None,
+) -> list[str]:
+    """Public helper for services to consistently detect explicit user-requested scope."""
+    return _build_user_scope_categories(user_inputs, renovation_elements)
+
+
+def _build_user_scope_work_items(categories: List[str]) -> List[str]:
+    items: list[str] = []
+    seen: set[str] = set()
+    for category in categories:
+        label = _CATEGORY_TO_USER_WORK_ITEM.get(category)
+        if not label or label in seen:
+            continue
+        seen.add(label)
+        items.append(label)
+    return items[:8]
 
 
 def _calculate_scope_severity_boost(text: str) -> float:
@@ -511,6 +620,7 @@ def _build_room_default_elements(room: str, room_type: str) -> tuple[list[str], 
 
 def _detect_impacted_elements(combined_text: str) -> tuple[list[str], list[ImpactedElementDetail]]:
     element_detection_rules: tuple[tuple[tuple[str, ...], str], ...] = (
+        (("structural damage", "major wall cracks", "foundation cracks", "foundation crack", "collapsed", "collapse"), "structural framing"),
         (("cabinet", "cabinets", "cupboard", "cupboards", "outdated cabinets"), "cabinet fronts"),
         (("counter", "countertop"), "countertops"),
         (("backsplash",), "backsplash"),
@@ -578,19 +688,38 @@ def _deduplicate_elements_with_details(
     return final_elements, final_details
 
 
-def _build_cost_line_items(data: RenovationEstimateInput, factor: float) -> List[RenovationLineItem]:
+def _build_cost_line_items(
+    data: RenovationEstimateInput,
+    factor: float,
+    *,
+    user_scope_categories: List[str] | None = None,
+) -> List[RenovationLineItem]:
     sqft = max(data.sqft, 1.0)
     kitchen_qty = max(1.0, data.beds / 3)
     bath_qty = max(1.0, data.baths)
 
     selected_scope = _map_selected_elements_to_scope(data.renovation_elements)
+    requested_scope = set(user_scope_categories or [])
     critical_scope = _derive_critical_safety_scope(data.issues)
     if selected_scope:
-        scope = sorted({*selected_scope, *critical_scope})
+        scope = sorted({*selected_scope, *requested_scope, *critical_scope})
+    elif requested_scope and data.issues:
+        # For damaged properties, keep remediation scope and add user-requested upgrades.
+        scope = sorted(
+            {
+                *_derive_scope_categories(data.issues, data.room_type, data.condition_score),
+                *requested_scope,
+                *critical_scope,
+            }
+        )
+    elif requested_scope:
+        # For good/no-issue properties, explicit user scope should override room defaults.
+        scope = sorted({*requested_scope, *critical_scope})
     else:
         scope = sorted(
             {
                 *_derive_scope_categories(data.issues, data.room_type, data.condition_score),
+                *requested_scope,
                 *critical_scope,
             }
         )
@@ -872,7 +1001,11 @@ def _calculate_confidence_score(
     gap_score_points: int = 0,
     age_score_points: int = 0,
 ) -> tuple[Literal["LOW", "MEDIUM", "HIGH"], int]:
-    score = 45
+    score = 50
+    if issue_count == 0 and condition_score >= 80:
+        score += 10
+    elif issue_count <= 1 and condition_score >= 70:
+        score += 6
     if issue_count >= 3:
         score += 20
     if issue_count >= 6:
@@ -983,7 +1116,9 @@ def _build_explanation_summary(
     issues: List[str],
     desired_quality_level: str,
     impacted_elements: List[str],
+    suggested_work_items: List[str],
     selected_elements: List[str] | None = None,
+    user_scope_categories: List[str] | None = None,
 ) -> str:
     selected_names = [str(x).strip() for x in (selected_elements or []) if str(x).strip()]
     if selected_names:
@@ -992,15 +1127,24 @@ def _build_explanation_summary(
             f"Estimate is scoped to user-selected renovation elements ({focus}) "
             f"with {desired_quality_level} finish assumptions."
         )
+    if user_scope_categories and not issues:
+        user_scope_names = ", ".join(user_scope_categories[:5])
+        return (
+            f"Estimate is scoped to user-requested updates ({user_scope_names}) "
+            f"with {desired_quality_level} finish assumptions."
+        )
     room = (room_type or "unknown").replace(",", ", ")
     element_note = ""
     if impacted_elements:
         element_note = " Focus areas: " + ", ".join(impacted_elements[:5]) + "."
     if issues:
-        top_issues = ", ".join(issues[:3])
+        top_issues = ", ".join(issues[:5])
+        work_scope = ", ".join(suggested_work_items[:4]) if suggested_work_items else "targeted remediation"
         return (
-            f"Property is classified as {renovation_class} rehab based on {room} condition and "
-            f"detected issues ({top_issues}). Estimate assumes {desired_quality_level} finish level."
+            f"Property is classified as {renovation_class} rehab based on detected condition issues. "
+            f"Detected issues: {top_issues}. "
+            f"Recommended work scope: {work_scope}. "
+            f"Estimate assumes {desired_quality_level} finish level in {room} areas."
             f"{element_note}"
         )
     return (
@@ -1014,10 +1158,31 @@ def _build_impacted_element_outputs(
     issues: List[str],
     suggested_work_items: List[str],
     selected_elements: List[str] | None = None,
+    user_scope_categories: List[str] | None = None,
 ) -> tuple[List[str], List[ImpactedElementDetail]]:
     selected_labels, selected_details = _build_selected_element_outputs(selected_elements)
     if selected_labels:
         return selected_labels, selected_details
+    if user_scope_categories:
+        scope_elements: list[str] = []
+        scope_details: list[ImpactedElementDetail] = []
+        for category in user_scope_categories:
+            label = _CATEGORY_TO_IMPACTED_LABEL.get(category)
+            if not label:
+                continue
+            scope_elements.append(label)
+            scope_details.append(
+                ImpactedElementDetail(
+                    name=label,
+                    source="user_selected",
+                    confidence=0.92,
+                    reason=f"Derived from user-requested scope intent ({category}).",
+                )
+            )
+        if scope_elements:
+            return _deduplicate_elements_with_details(scope_elements, scope_details)
+    if not issues:
+        return [], []
 
     room = _normalize_token_text(room_type)
     issue_text = " ".join(_normalize_token_text(issue) for issue in issues)
@@ -1042,6 +1207,18 @@ def _build_selected_work_items(renovation_elements: List[str]) -> List[str]:
         seen.add(key)
         items.append(f"{key.replace('_', ' ')} renovation")
     return items[:8]
+
+
+def _deduplicate_work_items(items: List[str]) -> List[str]:
+    seen: set[str] = set()
+    deduped: list[str] = []
+    for item in items:
+        key = _normalize_token_text(item)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        deduped.append(item)
+    return deduped[:8]
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:

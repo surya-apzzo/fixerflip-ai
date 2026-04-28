@@ -66,7 +66,7 @@ async def _wait_for_retry_backoff(attempt: int) -> None:
     await asyncio.sleep(_VISION_RETRY_BACKOFF_SECONDS * (2**attempt))
 
 
-async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None, str | None, str | None]:
+async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None, str | None, str | None]:
     """One image URL -> structured room detection via OpenAI."""
     if not (settings.OPENAI_VISION_ENABLED and settings.OPENAI_API_KEY):
         return None, _VISION_DISABLED_REASON, None
@@ -100,14 +100,16 @@ async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None
                     try:
                         parsed = _parse_response_json(raw)
                     except ValueError:
-                        logger.warning("Vision returned invalid JSON for URL %s", image_url)
                         return None, _VISION_INVALID_OUTPUT_REASON, model_name
                     if not isinstance(parsed, dict):
-                        logger.warning("Vision returned non-object JSON for URL %s", image_url)
                         return None, _VISION_INVALID_OUTPUT_REASON, model_name
                     return _parse_room_analysis(parsed), None, model_name
                 except Exception as exc:
                     last_failed_model = model_name
+                    is_retryable = _is_retryable_openai_exception(exc)
+                    if attempt < _VISION_MAX_RETRIES and is_retryable:
+                        await _wait_for_retry_backoff(attempt)
+                        continue
                     logger.warning(
                         "Renovation vision analysis failed for URL %s using model %s (attempt %s/%s): %s",
                         image_url,
@@ -116,9 +118,6 @@ async def analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None
                         _VISION_MAX_RETRIES + 1,
                         exc,
                     )
-                    if attempt < _VISION_MAX_RETRIES and _is_retryable_openai_exception(exc):
-                        await _wait_for_retry_backoff(attempt)
-                        continue
                     break
         return None, _VISION_REQUEST_FAILED_REASON, last_failed_model or primary_model
     except Exception as exc:
@@ -133,7 +132,7 @@ async def analyze_renovation_image_url(image_url: str) -> ImageConditionResult:
         return _build_fallback_condition_result(_VISION_EMPTY_IMAGE_URL_REASON)
 
     engine = ImageConditionEngine()
-    one, fallback_reason, model_name = await analyze_single_image_url(url)
+    one, fallback_reason, model_name = await _analyze_single_image_url(url)
     if one is not None:
         return engine.score_from_room_detections([one]).model_copy(
             update={
@@ -157,9 +156,9 @@ def _build_fallback_condition_result(reason: str, model_name: str | None = None)
     )
 
 
-def _to_float_or_default(v: Any, default: float) -> float:
+def _coerce_float_or_default(value: Any, default: float) -> float:
     try:
-        return float(v)
+        return float(value)
     except (TypeError, ValueError):
         return default
 
@@ -189,10 +188,9 @@ def _parse_issue_detections(engine: ImageConditionEngine, issues_raw: Any) -> li
                 continue
             canonical = engine.normalize_issue(issue_type)
             if canonical not in CANONICAL_ISSUE_TYPES:
-                logger.warning("Vision issue label not in catalog, ignored: %s", issue_type)
                 continue
             severity = _normalize_issue_severity(str(item.get("severity") or "moderate"))
-            conf = _to_float_or_default(item.get("confidence"), 0.8)
+            conf = _coerce_float_or_default(item.get("confidence"), 0.8)
             issues.append(
                 IssueDetection(
                     type=canonical,
@@ -203,7 +201,6 @@ def _parse_issue_detections(engine: ImageConditionEngine, issues_raw: Any) -> li
         elif isinstance(item, str) and item.strip():
             canonical = engine.normalize_issue(item.strip())
             if canonical not in CANONICAL_ISSUE_TYPES:
-                logger.warning("Vision issue label not in catalog, ignored: %s", item)
                 continue
             issues.append(IssueDetection(type=canonical, severity="moderate", confidence=0.8))
 
@@ -303,16 +300,14 @@ def _parse_positive_detections(engine: ImageConditionEngine, positives_raw: Any)
                 continue
             canonical_pos = engine.normalize_positive(pos_type)
             if canonical_pos not in CANONICAL_POSITIVE_TYPES:
-                logger.warning("Vision positive label not in catalog, ignored: %s", pos_type)
                 continue
-            conf = _to_float_or_default(item.get("confidence"), 0.8)
+            conf = _coerce_float_or_default(item.get("confidence"), 0.8)
             positives.append(
                 PositiveDetection(type=canonical_pos, confidence=max(0.0, min(1.0, conf)))
             )
         elif isinstance(item, str) and item.strip():
             canonical_pos = engine.normalize_positive(item.strip())
             if canonical_pos not in CANONICAL_POSITIVE_TYPES:
-                logger.warning("Vision positive label not in catalog, ignored: %s", item)
                 continue
             positives.append(PositiveDetection(type=canonical_pos, confidence=0.8))
     return positives
