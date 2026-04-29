@@ -1,4 +1,5 @@
-from typing import List, Union
+import json
+from typing import Any, List, Union
 
 from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -13,7 +14,7 @@ class Settings(BaseSettings):
     ENVIRONMENT: str = "local"
     DEBUG: bool = False
 
-    LOG_LEVEL: str = Field(default="INFO", description="Logging level (DEBUG, INFO, WARNING, ERROR)")
+    LOG_LEVEL: str = Field(default="CRITICAL", description="Logging level (DEBUG, INFO, WARNING, ERROR, CRITICAL)")
     LOG_JSON: bool = Field(
         default=False,
         description="Emit JSON logs (recommended in production behind log aggregators)",
@@ -43,6 +44,11 @@ class Settings(BaseSettings):
 
     # Set to false in production if you do not want /docs and OpenAPI exposed
     ENABLE_OPENAPI: bool = True
+
+    # Optional JSON object for request-validation overrides.
+    # Example:
+    # VALIDATION_RULE_OVERRIDES='{"sqft":{"minimum":500,"min_inclusive":true},"labor_index":{"maximum":3.0}}'
+    VALIDATION_RULE_OVERRIDES: dict[str, dict[str, Any]] = {}
 
     # Optional: OpenAI vision integration for image analysis.
     OPENAI_API_KEY: str = ""
@@ -80,6 +86,34 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_openai_strings(cls, v: str | None) -> str:
         return (v or "").strip()
+
+    @field_validator("VALIDATION_RULE_OVERRIDES", mode="before")
+    @classmethod
+    def parse_validation_rule_overrides(cls, v: object) -> dict[str, dict[str, Any]]:
+        if v in (None, ""):
+            return {}
+        if isinstance(v, str):
+            raw = v.strip()
+            if not raw:
+                return {}
+            try:
+                parsed = json.loads(raw)
+            except json.JSONDecodeError as exc:
+                raise ValueError("VALIDATION_RULE_OVERRIDES must be valid JSON") from exc
+            if not isinstance(parsed, dict):
+                raise ValueError("VALIDATION_RULE_OVERRIDES must decode to an object")
+            return {
+                str(field): value
+                for field, value in parsed.items()
+                if isinstance(value, dict)
+            }
+        if isinstance(v, dict):
+            return {
+                str(field): value
+                for field, value in v.items()
+                if isinstance(value, dict)
+            }
+        raise ValueError("VALIDATION_RULE_OVERRIDES must be a dict or JSON object string")
 
     @field_validator("IMAGE_DOWNLOAD_REFERER", mode="before")
     @classmethod

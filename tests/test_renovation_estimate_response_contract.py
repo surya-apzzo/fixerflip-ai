@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import app.services.renovation_payload_validator as payload_validator
 import app.services.renovation_service as renovation_service
 from app.schemas.responses.condition import ImageConditionResult
 from app.schemas.responses.estimate import RenovationEstimate
@@ -163,3 +164,31 @@ def test_request_validation_errors_are_normalized(client):
     detail = response.json().get("detail", {})
     assert detail.get("code") == "VALIDATION_ERROR"
     assert {"field": "sqft", "message": "Field required"} in detail.get("errors", [])
+
+
+def test_validation_rules_can_be_overridden_dynamically(client, monkeypatch):
+    monkeypatch.setattr(
+        payload_validator.settings,
+        "VALIDATION_RULE_OVERRIDES",
+        {
+            "sqft": {
+                "minimum": 1500,
+                "min_inclusive": True,
+            }
+        },
+    )
+
+    response = client.post(
+        "/api/v1/renovation/estimate",
+        json={
+            "sqft": 1200,
+            "beds": 3,
+            "baths": 2,
+            "condition_score": 65,
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json().get("detail", {})
+    assert detail.get("code") == "VALIDATION_ERROR"
+    assert {"field": "sqft", "message": "sqft must be >= 1500"} in detail.get("errors", [])
