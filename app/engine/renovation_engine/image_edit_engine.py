@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from openai import AsyncOpenAI
@@ -25,10 +25,11 @@ _DEFAULT_IMAGE_EDIT_INSTRUCTION = (
 
 _NO_ISSUES_DETECTED_INSTRUCTION = (
     "No specific AI-detected issues were found for this image. "
-    "Apply light cosmetic cleanup only: remove minor surface debris, "
-    "freshen paint where visibly worn, and clean surfaces. "
-    "Do not redesign, restage, or make structural changes. "
-    "Preserve all existing finishes, furniture, and room layout exactly."
+    "Default to a preservation-first edit: keep the image nearly identical and "
+    "change only clearly visible defects (if any). "
+    "Do not redesign, restage, replace finishes, or make structural changes. "
+    "Do not alter intact cabinets, counters, flooring, walls, ceilings, fixtures, "
+    "appliances, furniture, or decor unless explicitly requested by the user."
 )
 
 _BROWSER_USER_AGENT = (
@@ -53,17 +54,173 @@ def _build_image_download_headers(image_url: str) -> dict[str, str]:
     return headers
 
 
+def _build_proxy_image_urls(image_url: str) -> list[str]:
+    template = (settings.IMAGE_DOWNLOAD_PROXY_TEMPLATE or "").strip()
+    if not template:
+        return []
+    if "://" in image_url:
+        raw = image_url.split("://", 1)[1]
+    else:
+        raw = image_url
+    candidates: list[str] = []
+    for encoded_value in (
+        quote(raw, safe=""),
+        quote(f"https://{raw}", safe=""),
+    ):
+        url = template.replace("{url_no_scheme_encoded}", encoded_value)
+        if url not in candidates:
+            candidates.append(url)
+    return candidates
+
+
 _ELEMENT_HINTS = {
     "flooring": "floors and floor finish",
     "paint": "wall and ceiling paint finish",
     "lighting": "light fixtures and lighting look",
     "furniture": "furniture style and condition",
-    "kitchen": "kitchen cabinets, counters, and fixtures",
-    "bathroom": "bathroom vanity, tile, and fixtures",
-    "windows": "window frames and glass appearance",
-    "doors": "interior and exterior door appearance",
-    "plumbing": "visible sinks, faucets, and plumbing fixtures",
 }
+
+_ELEMENT_ACTION_HINTS = {
+    "flooring": (
+        "Flooring directive: visibly replace the existing floor finish in all clearly visible walkable floor areas "
+        "with a new tile look that is materially different from the source floor. Keep perspective and room geometry "
+        "identical, and do not alter cabinets, counters, walls, ceiling, appliances, furniture, or decor."
+    ),
+    "paint": (
+        "Paint directive: visibly update only the requested wall/ceiling paint surfaces while keeping all other finishes unchanged."
+    ),
+    "lighting": (
+        "Lighting directive: update only visible light fixtures and lighting tone/intensity while preserving all cabinetry, "
+        "walls, flooring, furniture, and room geometry."
+    ),
+    "furniture": (
+        "Furniture directive: update only furniture look/style/finish of existing furniture in place. "
+        "Do not add extra furniture pieces and do not alter architecture, cabinetry, walls, or flooring."
+    ),
+}
+
+_STRICT_DAMAGE_REPAIR_ONLY_RULES = (
+    "CRITICAL DAMAGE-REPAIR RULES: Keep the same room identity and object inventory. "
+    "Do not add any new furniture, kitchen cabinets, countertops, appliances, decor, fixtures, wall art, "
+    "plants, doors, windows, or architectural elements unless the user explicitly requested that exact addition. "
+    "Do not stage or redesign the room. Remove damage/debris and repair damaged surfaces in place only."
+)
+
+_SURFACE_CONTINUITY_RULES = (
+    "Surface continuity rule: when repairing a damaged wall or ceiling zone, finish the entire visibly affected "
+    "surface section with continuous texture/color so it does not look patchy, half-painted, or unfinished. "
+    "Blend repaired boundaries naturally into adjacent intact areas."
+)
+
+
+def _is_generic_renovate_request(text: str) -> bool:
+    t = (text or "").strip().lower()
+    if not t:
+        return False
+    generic_phrases = (
+        "renovate",
+        "please renovate",
+        "renovate this",
+        "renovate this one",
+        "fully renovate",
+        "make it renovated",
+    )
+    if any(phrase in t for phrase in generic_phrases):
+        return True
+    return bool(re.fullmatch(r"(please\s+)?renovate(\s+it|\s+this|\s+this\s+one)?[.!]?", t))
+
+
+def _append_issue_repair_directives(
+    directive_lines: list[str],
+    *,
+    issues: list[str],
+    elements: list[str],
+    element_descriptions: list[str],
+    base_instruction: str,
+) -> None:
+    directive_lines.append("AI-detected issues/damages to repair: " + ", ".join(issues) + ".")
+    directive_lines.append(
+        "Focus repairs on the above detected issues. Fix each one while preserving "
+        "all undamaged areas of the image."
+    )
+    directive_lines.append(_STRICT_DAMAGE_REPAIR_ONLY_RULES)
+    directive_lines.append(_SURFACE_CONTINUITY_RULES)
+    if any("ceiling" in issue.lower() or "wall" in issue.lower() for issue in issues):
+        directive_lines.append(
+            "For damaged wall/ceiling areas: fully restore each damaged section to a coherent finished state "
+            "within that section (no exposed broken layers, no partial repaint blocks)."
+        )
+    if elements:
+        directive_lines.append(
+            "After completing required damage repairs, apply user-requested upgrades only to: "
+            + ", ".join(element_descriptions)
+            + "."
+        )
+        directive_lines.append(
+            "These requested upgrades are secondary to safety/repair scope and must not remove necessary remediation work."
+        )
+    if not elements and _is_generic_renovate_request(base_instruction):
+        directive_lines.append(
+            "Generic renovate request detected. Treat this as damage/issue remediation only."
+        )
+        directive_lines.append(
+            "Do not redesign, restage, or modernize intact areas. Keep original layout, style, and non-damaged finishes."
+        )
+
+
+def _append_selected_element_directives(
+    directive_lines: list[str],
+    *,
+    visual_type: str,
+    elements: list[str],
+    element_descriptions: list[str],
+) -> None:
+    if visual_type != "select_elements_to_renovate":
+        return
+    if element_descriptions:
+        directive_lines.append(
+            "Selected elements to renovate: " + ", ".join(element_descriptions) + "."
+        )
+        directive_lines.append("Apply visible changes only to selected elements.")
+        directive_lines.append(
+            "Do NOT modify unselected elements (especially wall color, ceiling, flooring, cabinets, counters, appliances) unless explicitly selected."
+        )
+        directive_lines.append(
+            "At least one visible change must be made for each selected element while preserving the original room layout."
+        )
+        for element in elements:
+            action_hint = _ELEMENT_ACTION_HINTS.get(element)
+            if action_hint:
+                directive_lines.append(action_hint)
+        return
+    directive_lines.append(
+        "No specific elements were selected. Use conservative damage-repair mode only."
+    )
+    directive_lines.append(
+        "Keep all intact property features unchanged (especially cabinets, counters, flooring, walls, ceilings, fixtures, appliances, furniture, and decor)."
+    )
+
+
+def _append_reference_directives(
+    directive_lines: list[str],
+    *,
+    visual_type: str,
+    reference_image_url: str,
+) -> None:
+    if visual_type == "upload_my_own_reference_photo" and reference_image_url:
+        directive_lines.append(f"Reference image URL: {reference_image_url}")
+        directive_lines.append(
+            "Use the reference image as style guidance for color/material/finish while keeping source structure unchanged."
+        )
+    elif reference_image_url:
+        directive_lines.append(f"Reference image URL: {reference_image_url}")
+
+
+def _append_user_note_directive(directive_lines: list[str], *, base_instruction: str) -> None:
+    if base_instruction:
+        directive_lines.append("User instruction (highest priority): " + base_instruction)
+    else:
+        directive_lines.append("User note: " + _DEFAULT_IMAGE_EDIT_INSTRUCTION)
 
 
 def build_instruction_for_edit(
@@ -82,8 +239,9 @@ def build_instruction_for_edit(
     element_descriptions = [_ELEMENT_HINTS.get(e, e) for e in elements]
 
     directive_lines = [
-        "Primary directive: follow renovation type, visual type, and selected elements first.",
-        "If any user text conflicts with selected elements, selected elements take priority.",
+        "Primary directive: execute the explicit user instruction exactly and conservatively.",
+        "Hard constraint: change only the specifically requested parts of the image.",
+        "Hard constraint: do not add, remove, restage, redesign, or alter any non-requested objects/surfaces.",
         "Preserve original structural material (wood remains wood; concrete remains concrete).",
         f"Renovation type: {type_of_renovation}",
         f"Visual type: {visual_type}",
@@ -93,44 +251,28 @@ def build_instruction_for_edit(
 
     issues = [i.strip() for i in (detected_issues or []) if i and i.strip()]
     if issues:
-        directive_lines.append(
-            "AI-detected issues/damages to repair: " + ", ".join(issues) + "."
-        )
-        directive_lines.append(
-            "Focus repairs on the above detected issues. Fix each one while preserving "
-            "all undamaged areas of the image."
+        _append_issue_repair_directives(
+            directive_lines,
+            issues=issues,
+            elements=elements,
+            element_descriptions=element_descriptions,
+            base_instruction=base_instruction,
         )
     else:
         directive_lines.append(_NO_ISSUES_DETECTED_INSTRUCTION)
 
-    if visual_type == "select_elements_to_renovate":
-        if element_descriptions:
-            directive_lines.append(
-                "Selected elements to renovate: " + ", ".join(element_descriptions) + "."
-            )
-            directive_lines.append("Apply visible changes only to selected elements.")
-            directive_lines.append(
-                "Do NOT modify unselected elements (especially wall color, ceiling, flooring, cabinets, counters, appliances) unless explicitly selected."
-            )
-        else:
-            directive_lines.append(
-                "No specific elements were selected; apply a balanced full-scene renovation while preserving layout."
-            )
-
-    if visual_type == "upload_my_own_reference_photo" and reference_image_url:
-        directive_lines.append(f"Reference image URL: {reference_image_url}")
-        directive_lines.append(
-            "Use the reference image as style guidance for color/material/finish while keeping source structure unchanged."
-        )
-    elif reference_image_url:
-        directive_lines.append(f"Reference image URL: {reference_image_url}")
-
-    if base_instruction:
-        directive_lines.append(
-            "User note (apply only if consistent with selected elements): " + base_instruction
-        )
-    else:
-        directive_lines.append("User note: " + _DEFAULT_IMAGE_EDIT_INSTRUCTION)
+    _append_selected_element_directives(
+        directive_lines,
+        visual_type=visual_type,
+        elements=elements,
+        element_descriptions=element_descriptions,
+    )
+    _append_reference_directives(
+        directive_lines,
+        visual_type=visual_type,
+        reference_image_url=reference_image_url,
+    )
+    _append_user_note_directive(directive_lines, base_instruction=base_instruction)
 
     return "\n".join(directive_lines)
 
@@ -159,34 +301,9 @@ _TARGETED_CHANGE = _read_prompt_text(
     "MODE: Targeted edit only. Apply only what the user requested; keep the rest of the scene unchanged.",
 )
 
-_TARGETED_SCOPE_RE = tuple(
-    re.compile(p)
-    for p in (
-        r"\b(?:change|paint|replace|update)\s+only\b",
-        r"\bonly\s+(?:the|change|paint|replace|update)\b",
-        r"\bsolely\s+the\b",
-        r"\bjust\s+(the\s+)?(?:wall|walls|floor|flooring|ceiling|trim|baseboard|backsplash|cabinet|cabinets|counter|countertop|window|windows|door|doors|paint|color)\b",
-        r"\bjust\s+(?:change|paint|replace|update)\b",
-        r"\b(?:don'?t|do not)\s+(?:touch|change|alter|fix|repair)\b",
-        r"\bleave\s+(?:everything\s+else|the\s+rest|untouched)\b",
-        r"\breplace\s+only\b",
-        r"\b(?:change|paint|repaint)\s+(?:the\s+)?(?:wall|walls|ceiling|trim)\b",
-        r"\bwall\s+(?:color|colour)\b",
-        r"\b(?:ceiling|trim)\s+(?:color|colour)\b",
-    )
-)
-
-
-def _is_targeted_edit_instruction(instruction: str) -> bool:
-    """True if the user narrowed scope to a specific edit; otherwise use broad damage-repair mode."""
-    t = (instruction or "").strip().lower()
-    if not t:
-        return False
-    return any(rx.search(t) for rx in _TARGETED_SCOPE_RE)
-
-
 def _select_constraints_for_instruction(instruction: str) -> str:
-    if _is_targeted_edit_instruction(instruction):
+    # Any non-empty instruction should default to strict targeted-edit mode.
+    if (instruction or "").strip():
         return _TARGETED_CHANGE
     return _BROAD_RENOVATION
 
@@ -204,7 +321,13 @@ async def edit_property_image_from_url(
     if not instruction.strip():
         raise ValueError("instruction is required.")
 
-    image_bytes, media_type = await _download_source_image(image_url.strip())
+    image_bytes: bytes | None = None
+    media_type = "image/png"
+    try:
+        image_bytes, media_type = await _download_source_image(image_url.strip())
+    except Exception:
+        pass
+
     prompt_template = _load_edit_prompt_text()
     constraints = (
         preserve_elements.strip()
@@ -214,26 +337,34 @@ async def edit_property_image_from_url(
     prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    response = await client.images.edit(
-        model=settings.default_openai_image_edit_model,
-        image=("property_image.png", image_bytes, media_type),
-        prompt=prompt,
-        size="auto",
-        input_fidelity="high",
-        quality="high",
-    )
+    if image_bytes is None:
+        raise ValueError(
+            "Image URL could not be downloaded for structure-preserving edit. "
+            "Skipping generative fallback to avoid non-requested scene changes."
+        )
 
-    data = getattr(response, "data", None) or []
-    if not data or not getattr(data[0], "b64_json", None):
-        raise ValueError("Image edit failed: no image returned.")
+    try:
+        response = await client.images.edit(
+            model=settings.default_openai_image_edit_model,
+            image=("property_image.png", image_bytes, media_type),
+            prompt=prompt,
+            size="auto",
+        )
 
-    first = data[0]
-    revised_prompt = getattr(first, "revised_prompt", "") or prompt
-    return ImageEditResult(
-        revised_prompt=revised_prompt,
-        image_base64=first.b64_json,
-        media_type="image/png",
-    )
+        data = getattr(response, "data", None) or []
+        if not data or not getattr(data[0], "b64_json", None):
+            raise ValueError("Image edit failed: no image returned.")
+        first = data[0]
+        revised_prompt = getattr(first, "revised_prompt", "") or prompt
+        return ImageEditResult(
+            revised_prompt=revised_prompt,
+            image_base64=first.b64_json,
+            media_type="image/png",
+        )
+    except Exception as exc:
+        raise ValueError(
+            "Image edit request failed. Skipping generative fallback to avoid non-requested scene changes."
+        ) from exc
 
 
 async def _download_source_image(image_url: str) -> tuple[bytes, str]:
@@ -251,11 +382,30 @@ async def _download_source_image(image_url: str) -> tuple[bytes, str]:
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
-        raise ValueError(
-            f"Image URL could not be downloaded (HTTP {status}). "
-            "Some CDNs block non-browser clients; this server sends a browser-like User-Agent. "
-            "If it still fails, try IMAGE_DOWNLOAD_REFERER or a signed/proxy URL from your MLS provider."
-        ) from exc
+        proxy_urls = _build_proxy_image_urls(image_url)
+        if proxy_urls and status in (401, 403):
+            try:
+                last_proxy_exc: Exception | None = None
+                for proxy_url in proxy_urls:
+                    try:
+                        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                            response = await client.get(proxy_url, headers={"User-Agent": _BROWSER_USER_AGENT})
+                            response.raise_for_status()
+                        break
+                    except Exception as proxy_exc:
+                        last_proxy_exc = proxy_exc
+                        continue
+                else:
+                    raise last_proxy_exc or ValueError("Unknown proxy download failure")
+            except Exception as proxy_exc:
+                raise ValueError(
+                    f"Image URL could not be downloaded (HTTP {status}), and proxy fallback failed: {proxy_exc}"
+                ) from proxy_exc
+        else:
+            raise ValueError(
+                f"Image URL could not be downloaded (HTTP {status}). "
+                "Some CDNs block non-browser clients; configure IMAGE_DOWNLOAD_REFERER or IMAGE_DOWNLOAD_PROXY_TEMPLATE."
+            ) from exc
     except httpx.HTTPError as exc:
         raise ValueError(
             "Image URL could not be downloaded. "
