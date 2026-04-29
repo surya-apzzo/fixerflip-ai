@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     OPENAI_IMAGE_EDIT_MODEL: str = "gpt-image-1"
     OPENAI_MODEL: str = ""
     OPENAI_VISION_ENABLED: bool = False
+    RENOVATION_IMAGE_STRICT_GUARDRAIL: bool = False
 
     # Optional: Redis cache for image edits.
     REDIS_URL: str = ""
@@ -64,6 +65,7 @@ class Settings(BaseSettings):
     # Optional: Referer sent when downloading MLS/CDN image URLs (some return 403 without a browser-like Referer).
     # Example: https://www.realty.com/ or the URL your CDN expects.
     IMAGE_DOWNLOAD_REFERER: str = ""
+    IMAGE_DOWNLOAD_PROXY_TEMPLATE: str = ""
     STORAGE_ENDPOINT_URL: str = ""
     STORAGE_REGION: str = "auto"
     STORAGE_BUCKET_NAME: str = ""
@@ -115,7 +117,7 @@ class Settings(BaseSettings):
             }
         raise ValueError("VALIDATION_RULE_OVERRIDES must be a dict or JSON object string")
 
-    @field_validator("IMAGE_DOWNLOAD_REFERER", mode="before")
+    @field_validator("IMAGE_DOWNLOAD_REFERER", "IMAGE_DOWNLOAD_PROXY_TEMPLATE", mode="before")
     @classmethod
     def strip_image_download_referer(cls, v: str | None) -> str:
         return (v or "").strip()

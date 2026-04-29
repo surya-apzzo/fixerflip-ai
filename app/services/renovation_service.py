@@ -19,6 +19,7 @@ from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
 from app.services.renovation_response_mapper import build_renovation_estimate_response
 from app.services.storage_service import upload_base64_image_to_bucket
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +52,37 @@ def _has_style_upgrade_request(payload: RenovationEstimateRequest) -> bool:
         "premium",
     )
     return any(marker in text for marker in style_markers)
+
+
+def _is_severe_scene(image_condition: ImageConditionResult) -> bool:
+    score = int(getattr(image_condition, "condition_score", 100) or 100)
+    issues = [str(i).lower() for i in (getattr(image_condition, "issues", []) or [])]
+    severe_markers = (
+        "structural",
+        "water damage",
+        "mold",
+        "fire damage",
+        "smoke damage",
+        "major wall cracks",
+        "damaged ceiling",
+        "foundation",
+        "sagging roof",
+    )
+    return score <= 75 or any(any(marker in issue for marker in severe_markers) for issue in issues)
+
+
+def _room_signature(room_type: str) -> set[str]:
+    value = (room_type or "").strip().lower()
+    if not value:
+        return {"unknown"}
+    parts = {p.strip() for p in value.split(",") if p.strip()}
+    if not parts:
+        return {"unknown"}
+    return parts
+
+
+def _strict_guardrail_enabled() -> bool:
+    return bool(getattr(settings, "RENOVATION_IMAGE_STRICT_GUARDRAIL", False))
 
 
 def _resolve_target_style(payload: RenovationEstimateRequest) -> str:
@@ -128,7 +160,7 @@ async def _enforce_repair_only_guardrail(
     has_detected_issues: bool,
     pipeline_warnings: list[str],
 ) -> str | None:
-    if not candidate_url or not has_detected_issues or _has_style_upgrade_request(payload):
+    if not candidate_url or not has_detected_issues:
         return candidate_url
 
     try:
@@ -136,6 +168,25 @@ async def _enforce_repair_only_guardrail(
     except Exception as edited_analysis_exc:
         logger.warning("Edited image validation failed: %s", edited_analysis_exc)
         return candidate_url
+
+    original_rooms = _room_signature(getattr(image_condition, "room_type", "unknown"))
+    edited_rooms = _room_signature(getattr(edited_condition, "room_type", "unknown"))
+    severe_scene = _is_severe_scene(image_condition)
+    if severe_scene and original_rooms.isdisjoint(edited_rooms):
+        if _strict_guardrail_enabled():
+            pipeline_warnings.append(
+                "Edited output changed room identity for severe-damage scene; renovated image omitted."
+            )
+            return None
+        pipeline_warnings.append(
+            "Edited output changed room identity for severe-damage scene; keeping best generated output."
+        )
+        return candidate_url
+
+    if severe_scene and edited_condition.condition_score >= 90 and not edited_condition.issues:
+        pipeline_warnings.append(
+            "Edited output appears over-restored for severe-damage scene; strict retry triggered."
+        )
 
     if edited_condition.condition_score < 90 or edited_condition.issues:
         return candidate_url
@@ -165,16 +216,26 @@ async def _enforce_repair_only_guardrail(
         retry_condition = await analyze_renovation_image_url(retry_url)
     except Exception as retry_exc:
         logger.warning("Strict repair-only retry failed: %s", retry_exc)
+        if _strict_guardrail_enabled():
+            pipeline_warnings.append(
+                "Edited output appeared over-restored for repair-only mode; renovated image omitted."
+            )
+            return None
         pipeline_warnings.append(
-            "Edited output appeared over-restored for repair-only mode; source image retained."
+            "Edited output appeared over-restored for repair-only mode; keeping best generated output."
         )
-        return payload.image_url
+        return candidate_url
 
     if retry_condition.condition_score >= 90 and not retry_condition.issues:
+        if _strict_guardrail_enabled():
+            pipeline_warnings.append(
+                "Edited output remained over-restored after strict retry; renovated image omitted."
+            )
+            return None
         pipeline_warnings.append(
-            "Edited output remained over-restored after strict retry; source image retained."
+            "Edited output remained over-restored after strict retry; keeping best generated output."
         )
-        return payload.image_url
+        return candidate_url
 
     pipeline_warnings.append("Applied strict repair-only retry to avoid over-restoration.")
     return retry_url
@@ -217,8 +278,8 @@ async def _generate_renovated_image_url(
         logger.warning("Renovation image edit failed: %s", edit_exc)
         error_message = str(edit_exc) if isinstance(edit_exc, ValueError) else _PUBLIC_IMAGE_EDIT_ERROR
         pipeline_warnings.append(error_message)
-        # Return source image URL when edit fails so clients always receive a usable image link.
-        return payload.image_url
+        # Do not silently return the source image when edit fails.
+        return None
 
     uploaded_url = await _upload_renovated_image(
         image_base64=edit_result.image_base64,
