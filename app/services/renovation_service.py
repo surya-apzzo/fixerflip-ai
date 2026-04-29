@@ -19,6 +19,7 @@ from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
 from app.services.renovation_response_mapper import build_renovation_estimate_response
 from app.services.storage_service import upload_base64_image_to_bucket
+from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 

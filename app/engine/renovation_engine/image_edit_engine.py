@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import quote, urlparse
 
 import httpx
 from openai import AsyncOpenAI
@@ -52,6 +52,25 @@ def _build_image_download_headers(image_url: str) -> dict[str, str]:
         if parsed.scheme and parsed.netloc:
             headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
     return headers
+
+
+def _build_proxy_image_urls(image_url: str) -> list[str]:
+    template = (settings.IMAGE_DOWNLOAD_PROXY_TEMPLATE or "").strip()
+    if not template:
+        return []
+    if "://" in image_url:
+        raw = image_url.split("://", 1)[1]
+    else:
+        raw = image_url
+    candidates: list[str] = []
+    for encoded_value in (
+        quote(raw, safe=""),
+        quote(f"https://{raw}", safe=""),
+    ):
+        url = template.replace("{url_no_scheme_encoded}", encoded_value)
+        if url not in candidates:
+            candidates.append(url)
+    return candidates
 
 
 _ELEMENT_HINTS = {
@@ -316,6 +335,52 @@ def _select_constraints_for_instruction(instruction: str) -> str:
     return _BROAD_RENOVATION
 
 
+async def _generate_image_from_reference_url(
+    *,
+    client: AsyncOpenAI,
+    prompt: str,
+    source_image_url: str,
+) -> ImageEditResult:
+    generation_prompt = (
+        f"{prompt}\n\nSource image URL for reference: {source_image_url.strip()}\n"
+        "Generate a renovated version that preserves composition and layout."
+    )
+    gen_response = await client.images.generate(
+        model="gpt-image-1",
+        prompt=generation_prompt,
+        size="1024x1024",
+    )
+    gen_data = getattr(gen_response, "data", None) or []
+    if not gen_data:
+        raise ValueError("Image generation fallback returned no data.")
+    first_gen = gen_data[0]
+    b64 = getattr(first_gen, "b64_json", None)
+    if b64:
+        return ImageEditResult(
+            revised_prompt=prompt,
+            image_base64=b64,
+            media_type="image/png",
+        )
+    generated_url = getattr(first_gen, "url", None) or ""
+    if not generated_url:
+        raise ValueError("Image generation fallback returned neither b64_json nor url.")
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as gen_client:
+        generated_response = await gen_client.get(generated_url)
+        generated_response.raise_for_status()
+    generated_media_type = (
+        generated_response.headers.get("content-type", "image/png").split(";")[0].strip()
+        or "image/png"
+    )
+    import base64
+
+    encoded = base64.b64encode(generated_response.content).decode("utf-8")
+    return ImageEditResult(
+        revised_prompt=prompt,
+        image_base64=encoded,
+        media_type=generated_media_type,
+    )
+
+
 async def edit_property_image_from_url(
     *,
     image_url: str,
@@ -329,7 +394,13 @@ async def edit_property_image_from_url(
     if not instruction.strip():
         raise ValueError("instruction is required.")
 
-    image_bytes, media_type = await _download_source_image(image_url.strip())
+    image_bytes: bytes | None = None
+    media_type = "image/png"
+    try:
+        image_bytes, media_type = await _download_source_image(image_url.strip())
+    except Exception:
+        pass
+
     prompt_template = _load_edit_prompt_text()
     constraints = (
         preserve_elements.strip()
@@ -339,26 +410,37 @@ async def edit_property_image_from_url(
     prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    response = await client.images.edit(
-        model=settings.default_openai_image_edit_model,
-        image=("property_image.png", image_bytes, media_type),
-        prompt=prompt,
-        size="auto",
-        input_fidelity="high",
-        quality="high",
-    )
+    if image_bytes is None:
+        return await _generate_image_from_reference_url(
+            client=client,
+            prompt=prompt,
+            source_image_url=image_url,
+        )
 
-    data = getattr(response, "data", None) or []
-    if not data or not getattr(data[0], "b64_json", None):
-        raise ValueError("Image edit failed: no image returned.")
+    try:
+        response = await client.images.edit(
+            model=settings.default_openai_image_edit_model,
+            image=("property_image.png", image_bytes, media_type),
+            prompt=prompt,
+            size="auto",
+        )
 
-    first = data[0]
-    revised_prompt = getattr(first, "revised_prompt", "") or prompt
-    return ImageEditResult(
-        revised_prompt=revised_prompt,
-        image_base64=first.b64_json,
-        media_type="image/png",
-    )
+        data = getattr(response, "data", None) or []
+        if not data or not getattr(data[0], "b64_json", None):
+            raise ValueError("Image edit failed: no image returned.")
+        first = data[0]
+        revised_prompt = getattr(first, "revised_prompt", "") or prompt
+        return ImageEditResult(
+            revised_prompt=revised_prompt,
+            image_base64=first.b64_json,
+            media_type="image/png",
+        )
+    except Exception:
+        return await _generate_image_from_reference_url(
+            client=client,
+            prompt=prompt,
+            source_image_url=image_url,
+        )
 
 
 async def _download_source_image(image_url: str) -> tuple[bytes, str]:
@@ -376,11 +458,30 @@ async def _download_source_image(image_url: str) -> tuple[bytes, str]:
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
-        raise ValueError(
-            f"Image URL could not be downloaded (HTTP {status}). "
-            "Some CDNs block non-browser clients; this server sends a browser-like User-Agent. "
-            "If it still fails, try IMAGE_DOWNLOAD_REFERER or a signed/proxy URL from your MLS provider."
-        ) from exc
+        proxy_urls = _build_proxy_image_urls(image_url)
+        if proxy_urls and status in (401, 403):
+            try:
+                last_proxy_exc: Exception | None = None
+                for proxy_url in proxy_urls:
+                    try:
+                        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
+                            response = await client.get(proxy_url, headers={"User-Agent": _BROWSER_USER_AGENT})
+                            response.raise_for_status()
+                        break
+                    except Exception as proxy_exc:
+                        last_proxy_exc = proxy_exc
+                        continue
+                else:
+                    raise last_proxy_exc or ValueError("Unknown proxy download failure")
+            except Exception as proxy_exc:
+                raise ValueError(
+                    f"Image URL could not be downloaded (HTTP {status}), and proxy fallback failed: {proxy_exc}"
+                ) from proxy_exc
+        else:
+            raise ValueError(
+                f"Image URL could not be downloaded (HTTP {status}). "
+                "Some CDNs block non-browser clients; configure IMAGE_DOWNLOAD_REFERER or IMAGE_DOWNLOAD_PROXY_TEMPLATE."
+            ) from exc
     except httpx.HTTPError as exc:
         raise ValueError(
             "Image URL could not be downloaded. "
