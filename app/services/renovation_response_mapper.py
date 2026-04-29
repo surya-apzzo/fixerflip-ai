@@ -17,7 +17,11 @@ def _needs_systems_review(tokens: list[str]) -> bool:
     return any(any(marker in token for marker in risk_markers) for token in lowered)
 
 
-def to_production_renovation_response(estimate) -> RenovationEstimateResponse:
+def to_production_renovation_response(
+    estimate,
+    *,
+    renovated_image_url: str | None = None,
+) -> RenovationEstimateResponse:
     work_items = list(estimate.suggested_work_items)
     if _needs_systems_review([*estimate.assumptions, *work_items]):
         existing = {item.strip().lower() for item in work_items}
@@ -31,4 +35,5 @@ def to_production_renovation_response(estimate) -> RenovationEstimateResponse:
         suggested_work_items=work_items,
         confidence_score=f"{estimate.confidence_score}%",
         explanation_summary=estimate.explanation_summary,
+        renovated_image_url=renovated_image_url,
     )

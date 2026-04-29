@@ -28,6 +28,7 @@ The service returns:
 - `suggested_work_items`
 - `confidence_score`
 - `explanation_summary`
+- `renovated_image_url`
 
 There is also a lighter endpoint, `POST /api/v1/renovation/image-condition`, for image-only condition scoring.
 
@@ -299,7 +300,8 @@ Typical response:
     "kitchen update"
   ],
   "confidence_score": "82%",
-  "explanation_summary": "Property is classified as Moderate rehab based on kitchen condition and detected issues."
+  "explanation_summary": "Property is classified as Moderate rehab based on kitchen condition and detected issues.",
+  "renovated_image_url": "https://example.com/renovated.png"
 }
 ```
 
@@ -360,4 +362,4 @@ Deployment details reflected in the codebase:
 - This repo currently documents and implements renovation endpoints only.
 - The previous README mentioned a valuation endpoint, but that endpoint is not present in the current codebase.
 - The image-condition route currently accepts `image_url` as a query parameter, not a JSON body.
-- Renovated preview uploads happen as a background side effect of the estimate flow when storage is configured, but the uploaded URL is not yet returned by the public API response.
+- Renovated preview uploads happen as part of the estimate flow when image editing and storage are configured, and the uploaded URL is returned as `renovated_image_url`.
