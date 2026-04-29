@@ -78,11 +78,6 @@ _ELEMENT_HINTS = {
     "paint": "wall and ceiling paint finish",
     "lighting": "light fixtures and lighting look",
     "furniture": "furniture style and condition",
-    "kitchen": "kitchen cabinets, counters, and fixtures",
-    "bathroom": "bathroom vanity, tile, and fixtures",
-    "windows": "window frames and glass appearance",
-    "doors": "interior and exterior door appearance",
-    "plumbing": "visible sinks, faucets, and plumbing fixtures",
 }
 
 _ELEMENT_ACTION_HINTS = {
@@ -94,11 +89,13 @@ _ELEMENT_ACTION_HINTS = {
     "paint": (
         "Paint directive: visibly update only the requested wall/ceiling paint surfaces while keeping all other finishes unchanged."
     ),
-    "kitchen": (
-        "Kitchen directive: change only kitchen-scope surfaces requested by the user and preserve all adjacent non-kitchen areas."
+    "lighting": (
+        "Lighting directive: update only visible light fixtures and lighting tone/intensity while preserving all cabinetry, "
+        "walls, flooring, furniture, and room geometry."
     ),
-    "bathroom": (
-        "Bathroom directive: change only bathroom-scope surfaces requested by the user and preserve all adjacent non-bathroom areas."
+    "furniture": (
+        "Furniture directive: update only furniture look/style/finish of existing furniture in place. "
+        "Do not add extra furniture pieces and do not alter architecture, cabinetry, walls, or flooring."
     ),
 }
 
@@ -188,6 +185,9 @@ def _append_selected_element_directives(
         directive_lines.append(
             "Do NOT modify unselected elements (especially wall color, ceiling, flooring, cabinets, counters, appliances) unless explicitly selected."
         )
+        directive_lines.append(
+            "At least one visible change must be made for each selected element while preserving the original room layout."
+        )
         for element in elements:
             action_hint = _ELEMENT_ACTION_HINTS.get(element)
             if action_hint:
@@ -218,9 +218,7 @@ def _append_reference_directives(
 
 def _append_user_note_directive(directive_lines: list[str], *, base_instruction: str) -> None:
     if base_instruction:
-        directive_lines.append(
-            "User note (apply only if consistent with selected elements): " + base_instruction
-        )
+        directive_lines.append("User instruction (highest priority): " + base_instruction)
     else:
         directive_lines.append("User note: " + _DEFAULT_IMAGE_EDIT_INSTRUCTION)
 
@@ -241,8 +239,9 @@ def build_instruction_for_edit(
     element_descriptions = [_ELEMENT_HINTS.get(e, e) for e in elements]
 
     directive_lines = [
-        "Primary directive: follow renovation type, visual type, and selected elements first.",
-        "If any user text conflicts with selected elements, selected elements take priority.",
+        "Primary directive: execute the explicit user instruction exactly and conservatively.",
+        "Hard constraint: change only the specifically requested parts of the image.",
+        "Hard constraint: do not add, remove, restage, redesign, or alter any non-requested objects/surfaces.",
         "Preserve original structural material (wood remains wood; concrete remains concrete).",
         f"Renovation type: {type_of_renovation}",
         f"Visual type: {visual_type}",
@@ -302,83 +301,11 @@ _TARGETED_CHANGE = _read_prompt_text(
     "MODE: Targeted edit only. Apply only what the user requested; keep the rest of the scene unchanged.",
 )
 
-_TARGETED_SCOPE_RE = tuple(
-    re.compile(p)
-    for p in (
-        r"\b(?:change|paint|replace|update)\s+only\b",
-        r"\bonly\s+(?:the|change|paint|replace|update)\b",
-        r"\bsolely\s+the\b",
-        r"\bjust\s+(the\s+)?(?:wall|walls|floor|flooring|ceiling|trim|baseboard|backsplash|cabinet|cabinets|counter|countertop|window|windows|door|doors|paint|color)\b",
-        r"\bjust\s+(?:change|paint|replace|update)\b",
-        r"\b(?:don'?t|do not)\s+(?:touch|change|alter|fix|repair)\b",
-        r"\bleave\s+(?:everything\s+else|the\s+rest|untouched)\b",
-        r"\breplace\s+only\b",
-        r"\b(?:change|paint|repaint)\s+(?:the\s+)?(?:wall|walls|ceiling|trim)\b",
-        r"\b(?:change|replace|update|refinish|redo)\s+(?:the\s+)?(?:floor|flooring|tile|tiles|backsplash|cabinet|cabinets|counter|countertop|paint|wall|walls|ceiling|trim)\b",
-        r"\bwall\s+(?:color|colour)\b",
-        r"\b(?:ceiling|trim)\s+(?:color|colour)\b",
-    )
-)
-
-
-def _is_targeted_edit_instruction(instruction: str) -> bool:
-    """True if the user narrowed scope to a specific edit; otherwise use broad damage-repair mode."""
-    t = (instruction or "").strip().lower()
-    if not t:
-        return False
-    return any(rx.search(t) for rx in _TARGETED_SCOPE_RE)
-
-
 def _select_constraints_for_instruction(instruction: str) -> str:
-    if _is_targeted_edit_instruction(instruction):
+    # Any non-empty instruction should default to strict targeted-edit mode.
+    if (instruction or "").strip():
         return _TARGETED_CHANGE
     return _BROAD_RENOVATION
-
-
-async def _generate_image_from_reference_url(
-    *,
-    client: AsyncOpenAI,
-    prompt: str,
-    source_image_url: str,
-) -> ImageEditResult:
-    generation_prompt = (
-        f"{prompt}\n\nSource image URL for reference: {source_image_url.strip()}\n"
-        "Generate a renovated version that preserves composition and layout."
-    )
-    gen_response = await client.images.generate(
-        model="gpt-image-1",
-        prompt=generation_prompt,
-        size="1024x1024",
-    )
-    gen_data = getattr(gen_response, "data", None) or []
-    if not gen_data:
-        raise ValueError("Image generation fallback returned no data.")
-    first_gen = gen_data[0]
-    b64 = getattr(first_gen, "b64_json", None)
-    if b64:
-        return ImageEditResult(
-            revised_prompt=prompt,
-            image_base64=b64,
-            media_type="image/png",
-        )
-    generated_url = getattr(first_gen, "url", None) or ""
-    if not generated_url:
-        raise ValueError("Image generation fallback returned neither b64_json nor url.")
-    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as gen_client:
-        generated_response = await gen_client.get(generated_url)
-        generated_response.raise_for_status()
-    generated_media_type = (
-        generated_response.headers.get("content-type", "image/png").split(";")[0].strip()
-        or "image/png"
-    )
-    import base64
-
-    encoded = base64.b64encode(generated_response.content).decode("utf-8")
-    return ImageEditResult(
-        revised_prompt=prompt,
-        image_base64=encoded,
-        media_type=generated_media_type,
-    )
 
 
 async def edit_property_image_from_url(
@@ -411,10 +338,9 @@ async def edit_property_image_from_url(
 
     client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
     if image_bytes is None:
-        return await _generate_image_from_reference_url(
-            client=client,
-            prompt=prompt,
-            source_image_url=image_url,
+        raise ValueError(
+            "Image URL could not be downloaded for structure-preserving edit. "
+            "Skipping generative fallback to avoid non-requested scene changes."
         )
 
     try:
@@ -435,12 +361,10 @@ async def edit_property_image_from_url(
             image_base64=first.b64_json,
             media_type="image/png",
         )
-    except Exception:
-        return await _generate_image_from_reference_url(
-            client=client,
-            prompt=prompt,
-            source_image_url=image_url,
-        )
+    except Exception as exc:
+        raise ValueError(
+            "Image edit request failed. Skipping generative fallback to avoid non-requested scene changes."
+        ) from exc
 
 
 async def _download_source_image(image_url: str) -> tuple[bytes, str]:

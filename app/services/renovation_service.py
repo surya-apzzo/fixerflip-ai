@@ -19,7 +19,6 @@ from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
 from app.services.renovation_response_mapper import build_renovation_estimate_response
 from app.services.storage_service import upload_base64_image_to_bucket
-from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -316,28 +315,27 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
             update={
                 "assumptions": [
                     *estimate.assumptions,
-                    "Estimate scope is constrained to user-selected renovation elements only.",
+                    "Estimate baseline uses user-selected renovation elements; explicit user instructions are priced as additive scope when applicable.",
                 ]
             }
         )
-    else:
-        if user_scope_categories:
-            estimate = estimate.model_copy(
-                update={
-                    "assumptions": [
-                        *estimate.assumptions,
-                        "Estimate scope follows explicit user-requested renovation intent.",
-                    ]
-                }
-            )
-        else:
-            estimate = apply_user_input_cost_adjustments(
-                estimate,
-                payload.user_inputs,
-                payload.sqft,
-                location_factor=location_factor,
-                renovation_elements=payload.renovation_elements,
-            )
+    elif user_scope_categories:
+        estimate = estimate.model_copy(
+            update={
+                "assumptions": [
+                    *estimate.assumptions,
+                    "Estimate scope follows explicit user-requested renovation intent.",
+                ]
+            }
+        )
+
+    estimate = apply_user_input_cost_adjustments(
+        estimate,
+        payload.user_inputs,
+        payload.sqft,
+        location_factor=location_factor,
+        renovation_elements=payload.renovation_elements,
+    )
 
     analysis_status = getattr(image_condition, "analysis_status", "ai_success")
     fallback_reason = getattr(image_condition, "fallback_reason", None)

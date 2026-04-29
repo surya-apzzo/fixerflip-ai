@@ -12,6 +12,53 @@ from app.schemas.requests.renovation import RenovationEstimateRequest
 _ALLOWED_QUALITY_LEVELS = {"cosmetic", "standard", "premium", "luxury"}
 _VALIDATION_ERROR_CODE = "VALIDATION_ERROR"
 _REQUIRED_CONDITION_SOURCE_MESSAGE = "Provide either image_url or condition_score fallback."
+_ALLOWED_RENOVATION_ELEMENTS = {"flooring", "paint", "lighting", "furniture"}
+_MIN_RENOVATION_CONTEXT_TOKENS = 1
+_RENOVATION_ELEMENT_ALIASES = {
+    "floor": "flooring",
+    "tiles": "flooring",
+    "tile": "flooring",
+    "wall": "paint",
+    "walls": "paint",
+    "painting": "paint",
+    "lights": "lighting",
+    "light": "lighting",
+    "furnitures": "furniture",
+}
+_RENOVATION_DOMAIN_KEYWORDS = {
+    "home",
+    "house",
+    "property",
+    "room",
+    "interior",
+    "exterior",
+    "renovate",
+    "renovation",
+    "remodel",
+    "repair",
+    "upgrade",
+    "replace",
+    "refinish",
+    "paint",
+    "wall",
+    "ceiling",
+    "floor",
+    "flooring",
+    "tile",
+    "lighting",
+    "light",
+    "fixture",
+    "furniture",
+    "kitchen",
+    "bathroom",
+    "cabinet",
+    "counter",
+    "countertop",
+    "backsplash",
+    "door",
+    "window",
+    "stair",
+}
 
 
 class ValidationErrorItem(TypedDict):
@@ -51,13 +98,43 @@ def _normalize_renovation_elements(value: object) -> list[str]:
     output: list[str] = []
     for item in raw:
         key = item.lower()
+        canonical = _RENOVATION_ELEMENT_ALIASES.get(key, key)
+        if canonical not in _ALLOWED_RENOVATION_ELEMENTS:
+            continue
+        key = canonical
         if key in seen:
             continue
         seen.add(key)
-        output.append(item)
+        output.append(key)
         if len(output) >= 4:
             break
     return output
+
+
+def _extract_raw_renovation_elements(value: object) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, str):
+        return [x.strip() for x in value.split(",") if x.strip()]
+    if isinstance(value, list):
+        return [str(x).strip() for x in value if str(x).strip()]
+    return []
+
+
+def _find_invalid_renovation_elements(value: object) -> list[str]:
+    raw = _extract_raw_renovation_elements(value)
+    invalid: list[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        normalized = item.lower()
+        canonical = _RENOVATION_ELEMENT_ALIASES.get(normalized, normalized)
+        if canonical in _ALLOWED_RENOVATION_ELEMENTS:
+            continue
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        invalid.append(item)
+    return invalid
 
 
 def _normalize_issue_list(value: object) -> list[str]:
@@ -97,6 +174,19 @@ def _normalize_desired_quality_level(value: object) -> str:
 def _normalize_optional_string(value: object, *, fallback: str = "") -> str:
     normalized = str(value or "").strip()
     return normalized or fallback
+
+
+def _is_renovation_domain_instruction(text: str) -> bool:
+    lowered = (text or "").strip().lower()
+    if not lowered:
+        return True
+    token_hits = 0
+    for keyword in _RENOVATION_DOMAIN_KEYWORDS:
+        if keyword in lowered:
+            token_hits += 1
+            if token_hits >= _MIN_RENOVATION_CONTEXT_TOKENS:
+                return True
+    return False
 
 
 def _append_error(errors: list[ValidationErrorItem], *, field: str, message: str) -> None:
@@ -299,7 +389,11 @@ def _validate_numeric_rule(
         _append_error(errors, field=rule.field, message=rule.message)
 
 
-def _validate_payload_values(payload: RenovationEstimateRequest) -> None:
+def _validate_payload_values(
+    payload: RenovationEstimateRequest,
+    *,
+    invalid_renovation_elements: list[str] | None = None,
+) -> None:
     errors: list[ValidationErrorItem] = []
 
     for rule in _build_numeric_validation_rules(payload):
@@ -310,6 +404,23 @@ def _validate_payload_values(payload: RenovationEstimateRequest) -> None:
             errors,
             field="image_url",
             message=_REQUIRED_CONDITION_SOURCE_MESSAGE,
+        )
+    if invalid_renovation_elements:
+        allowed = ", ".join(sorted(_ALLOWED_RENOVATION_ELEMENTS))
+        invalid = ", ".join(invalid_renovation_elements)
+        _append_error(
+            errors,
+            field="renovation_elements",
+            message=f"Unsupported element(s): {invalid}. Allowed values: {allowed}.",
+        )
+    if payload.user_inputs and not _is_renovation_domain_instruction(payload.user_inputs):
+        _append_error(
+            errors,
+            field="user_inputs",
+            message=(
+                "Instruction must be related to home renovation scope only "
+                "(e.g., flooring, paint, lighting, furniture, room updates)."
+            ),
         )
 
     if errors:
@@ -322,6 +433,7 @@ def _validate_payload_values(payload: RenovationEstimateRequest) -> None:
 def validate_and_normalize_renovation_payload(
     payload: RenovationEstimateRequest,
 ) -> RenovationEstimateRequest:
+    invalid_renovation_elements = _find_invalid_renovation_elements(payload.renovation_elements)
     normalized = payload.model_copy(
         update={
             "image_url": _normalize_optional_string(payload.image_url),
@@ -351,5 +463,8 @@ def validate_and_normalize_renovation_payload(
             "user_inputs": _normalize_optional_string(payload.user_inputs),
         }
     )
-    _validate_payload_values(normalized)
+    _validate_payload_values(
+        normalized,
+        invalid_renovation_elements=invalid_renovation_elements,
+    )
     return normalized

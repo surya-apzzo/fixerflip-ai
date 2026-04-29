@@ -155,30 +155,20 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
 _ELEMENT_SELECTION_SCOPE_PHRASES: dict[str, str] = {
     "flooring": "new flooring",
     "paint": "new paint",
-    "kitchen": "kitchen remodel",
-    "bathroom": "bathroom remodel",
-    "windows": "window replacement",
-    "doors": "door replacement",
     "lighting": "electrical upgrade",
+    "furniture": "furniture refresh",
 }
 
 _SELECTED_ELEMENT_TO_COST_CATEGORY: dict[str, str] = {
     "flooring": "flooring",
     "paint": "paint",
-    "kitchen": "kitchen",
-    "bathroom": "bathroom",
-    "windows": "window",
-    "doors": "doors",
     "lighting": "electrical",
+    "furniture": "paint",
 }
 
 _SELECTED_ELEMENT_TO_IMPACTED_LABEL: dict[str, str] = {
     "flooring": "flooring",
     "paint": "paint finish",
-    "kitchen": "kitchen surfaces",
-    "bathroom": "bathroom surfaces",
-    "windows": "windows",
-    "doors": "doors",
     "lighting": "lighting",
     "furniture": "furniture",
 }
@@ -203,7 +193,17 @@ INTENT_MAP = {
         "replace tile",
         "replace tiles",
     ],
-    "kitchen": ["kitchen remodel", "kitchen renovation", "new kitchen", "upgrade kitchen", "new kitchen cabinets"],
+    "kitchen": [
+        "kitchen remodel",
+        "kitchen renovation",
+        "new kitchen",
+        "upgrade kitchen",
+        "new kitchen cabinets",
+        "cabinet",
+        "cabinets",
+        "cabinet color",
+        "cabinet paint",
+    ],
     "bathroom": ["bathroom remodel", "bathroom renovation", "bath upgrade", "new bathroom"],
     "window": ["window", "windows", "window replacement", "window upgrade", "new window"],
     "roof": ["roof repair", "roof replacement", "roof upgrade", "new roof"],
@@ -510,11 +510,15 @@ def apply_user_input_cost_adjustments(
     location_factor: float = 1.0,
     renovation_elements: List[str] | None = None,
 ) -> RenovationEstimate:
-    text = _build_user_scope_text(user_inputs, renovation_elements)
+    text = (user_inputs or "").strip().lower()
     if not text:
         return estimate
 
     matched_intents = list(set(_detect_scope_intents(text)))
+    selected_scope = set(_map_selected_elements_to_scope(renovation_elements or []))
+    # Avoid double counting: selected elements are already included in base line-items.
+    if selected_scope:
+        matched_intents = [intent for intent in matched_intents if intent not in selected_scope]
     if not matched_intents:
         return estimate
 
@@ -715,6 +719,11 @@ def _build_cost_line_items(
     elif requested_scope:
         # For good/no-issue properties, explicit user scope should override room defaults.
         scope = sorted({*requested_scope, *critical_scope})
+    elif not data.issues:
+        # No detected issues + no explicit scope should remain conservative.
+        # Avoid inferring expensive full-room remodel categories (e.g., kitchen fixed-cost)
+        # from room type alone.
+        scope = sorted({*critical_scope, "paint"})
     else:
         scope = sorted(
             {
@@ -976,6 +985,13 @@ def _estimate_timeline_weeks(
     days_on_market: int,
     age_score_points: int = 0,
 ) -> tuple[int, int]:
+    # Fast-path for good-condition homes with cosmetic-only scope.
+    # When there are no detected issues, timeline should reflect light refresh work.
+    if issue_count == 0 and renovation_class == "Cosmetic":
+        if sqft <= 3000:
+            return 2, 3
+        return 3, 4
+
     base = 3
     if sqft > 1400:
         base += 2
