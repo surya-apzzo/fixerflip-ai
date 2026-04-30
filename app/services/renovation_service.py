@@ -16,6 +16,7 @@ from app.engine.renovation_engine.renovation_cost_engine import (
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
 from app.schemas.requests.renovation import RenovationEstimateRequest
 from app.schemas.responses.renovation import RenovationEstimateResponse
+from app.services.location_indices_service import resolve_location_indices
 from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
 from app.services.renovation_response_mapper import build_renovation_estimate_response
 from app.services.storage_service import upload_base64_image_to_bucket
@@ -265,13 +266,43 @@ def _build_renovation_estimate_input(
         desired_quality_level=payload.desired_quality_level,
         labor_index=payload.labor_index,
         material_index=payload.material_index,
+        time_factor=payload.time_factor,
+        location_factor=payload.location_factor,
         renovation_elements=payload.renovation_elements,
         user_inputs=payload.user_inputs,
     )
 
 
+async def _apply_dynamic_location_indices(
+    payload: RenovationEstimateRequest,
+) -> RenovationEstimateRequest:
+    if not payload.zip_code:
+        return payload
+
+    factors = await resolve_location_indices(payload.zip_code)
+    updates: dict[str, float] = {}
+    if factors.labor_index is not None:
+        updates["labor_index"] = factors.labor_index
+    if factors.time_factor is not None:
+        updates["time_factor"] = factors.time_factor
+    if factors.location_factor is not None:
+        updates["location_factor"] = factors.location_factor
+
+    if not updates:
+        return payload
+    return payload.model_copy(update=updates)
+
+
+def _resolve_cost_adjustment_factor(payload: RenovationEstimateRequest) -> float:
+    if payload.time_factor != 1.0 or payload.location_factor != 1.0:
+        return max(payload.time_factor * payload.location_factor, 0.5)
+    return max((payload.labor_index * 0.6) + (payload.material_index * 0.4), 0.5)
+
+
 async def build_renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
     payload = validate_and_normalize_renovation_payload(payload)
+    payload = await _apply_dynamic_location_indices(payload)
+
     pipeline_warnings: list[str] = []
     renovated_image_url: str | None = None
     user_scope_categories = infer_user_scope_categories(
@@ -308,7 +339,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         resolved_target_style=resolved_target_style,
     )
     estimate = estimate_renovation_cost(estimate_input)
-    location_factor = max((payload.labor_index * 0.6) + (payload.material_index * 0.4), 0.5)
+    location_factor = _resolve_cost_adjustment_factor(payload)
 
     if payload.renovation_elements:
         estimate = estimate.model_copy(

@@ -12,18 +12,38 @@ from app.schemas.requests.renovation import RenovationEstimateRequest
 _ALLOWED_QUALITY_LEVELS = {"cosmetic", "standard", "premium", "luxury"}
 _VALIDATION_ERROR_CODE = "VALIDATION_ERROR"
 _REQUIRED_CONDITION_SOURCE_MESSAGE = "Provide either image_url or condition_score fallback."
-_ALLOWED_RENOVATION_ELEMENTS = {"flooring", "paint", "lighting", "furniture"}
+_ALLOWED_RENOVATION_ELEMENTS = {
+    "flooring",
+    "paint",
+    "lighting",
+    "furniture",
+    "roof",
+    "cabinet",
+    "window",
+    "stair",
+    "door",
+}
 _MIN_RENOVATION_CONTEXT_TOKENS = 1
 _RENOVATION_ELEMENT_ALIASES = {
     "floor": "flooring",
+    "floors": "flooring",
     "tiles": "flooring",
     "tile": "flooring",
-    "wall": "paint",
     "walls": "paint",
+    "wall": "paint",
     "painting": "paint",
     "lights": "lighting",
     "light": "lighting",
     "furnitures": "furniture",
+    "roofing": "roof",
+    "countertop": "cabinet",
+    "cabinets": "cabinet",
+    "cabinetry": "cabinet",
+    "windows": "window",
+    "staircase": "stair",
+    "backsplash": "cabinet",
+    "doors": "door",
+
 }
 _RENOVATION_DOMAIN_KEYWORDS = {
     "home",
@@ -106,7 +126,7 @@ def _normalize_renovation_elements(value: object) -> list[str]:
             continue
         seen.add(key)
         output.append(key)
-        if len(output) >= 4:
+        if len(output) >= 5:
             break
     return output
 
@@ -166,11 +186,20 @@ def _normalize_desired_quality_level(value: object) -> str:
         "standard investor rehab": "standard",
         "investor rehab": "standard",
         "standard rehab": "standard",
+        "cosmetic rehab": "cosmetic",
+        "light rehab": "cosmetic",
+        "premium rehab": "premium",
+        "luxury rehab": "luxury",
+
     }
     normalized = aliases.get(raw, raw)
     return normalized if normalized in _ALLOWED_QUALITY_LEVELS else "standard"
 
 
+# select_elements_to_renovate
+# upload my own reference photo
+# choose a existing renovation style
+# or provide custom instructions related to renovation scope
 def _normalize_optional_string(value: object, *, fallback: str = "") -> str:
     normalized = str(value or "").strip()
     return normalized or fallback
@@ -341,6 +370,8 @@ def _base_numeric_validation_rules(_payload: RenovationEstimateRequest) -> tuple
         _build_numeric_rule(field="condition_score", minimum=0.0, maximum=100.0),
         _build_numeric_rule(field="labor_index", minimum=0.7, maximum=2.5),
         _build_numeric_rule(field="material_index", minimum=0.7, maximum=2.5),
+        _build_numeric_rule(field="time_factor", minimum=0.5, maximum=2.5),
+        _build_numeric_rule(field="location_factor", minimum=0.5, maximum=2.5),
     )
 
 

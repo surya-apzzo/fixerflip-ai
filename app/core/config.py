@@ -62,6 +62,17 @@ class Settings(BaseSettings):
     REDIS_URL: str = ""
     REDIS_CACHE_TTL_SECONDS: int = Field(default=3600, ge=60, le=86400)
 
+    # Optional: construction cost factors.
+    # BLS provides national labor trend/time factor. RSMeans/Gordian provides
+    # ZIP/location-specific regional factor.
+    BLS_API_KEY: str = ""
+    BLS_BASE_WAGE: float = Field(default=34.50, gt=0.0)
+    BLS_CONSTRUCTION_WAGE_SERIES_ID: str = "CES2000000008"
+
+    RSMEANS_API_KEY: str = ""
+    RSMEANS_BASE_URL: str = ""
+    LOCATION_INDEX_CACHE_TTL_SECONDS: int = Field(default=2_592_000, ge=60, le=31_536_000)
+
     # Optional: Referer sent when downloading MLS/CDN image URLs (some return 403 without a browser-like Referer).
     # Example: https://www.realty.com/ or the URL your CDN expects.
     IMAGE_DOWNLOAD_REFERER: str = ""
@@ -120,6 +131,17 @@ class Settings(BaseSettings):
     @field_validator("IMAGE_DOWNLOAD_REFERER", mode="before")
     @classmethod
     def strip_image_download_referer(cls, v: str | None) -> str:
+        return (v or "").strip()
+
+    @field_validator(
+        "BLS_API_KEY",
+        "BLS_CONSTRUCTION_WAGE_SERIES_ID",
+        "RSMEANS_API_KEY",
+        "RSMEANS_BASE_URL",
+        mode="before",
+    )
+    @classmethod
+    def normalize_location_index_strings(cls, v: str | None) -> str:
         return (v or "").strip()
 
     @field_validator(

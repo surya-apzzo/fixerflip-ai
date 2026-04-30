@@ -38,6 +38,8 @@ class RenovationEstimateInput(BaseModel):
     room_type: str = "unknown"
     labor_index: float = Field(default=1.0, ge=0.7, le=2.5)
     material_index: float = Field(default=1.0, ge=0.7, le=2.5)
+    time_factor: float = Field(default=1.0, ge=0.5, le=2.5)
+    location_factor: float = Field(default=1.0, ge=0.5, le=2.5)
     desired_quality_level: Literal["cosmetic", "standard", "premium", "luxury"] = "standard"
     target_renovation_style: str = "investor_standard"
     address: str = ""
