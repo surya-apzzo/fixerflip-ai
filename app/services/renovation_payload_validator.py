@@ -370,6 +370,8 @@ def _base_numeric_validation_rules(_payload: RenovationEstimateRequest) -> tuple
         _build_numeric_rule(field="condition_score", minimum=0.0, maximum=100.0),
         _build_numeric_rule(field="labor_index", minimum=0.7, maximum=2.5),
         _build_numeric_rule(field="material_index", minimum=0.7, maximum=2.5),
+        _build_numeric_rule(field="time_factor", minimum=0.5, maximum=2.5),
+        _build_numeric_rule(field="location_factor", minimum=0.5, maximum=2.5),
     )
 
 

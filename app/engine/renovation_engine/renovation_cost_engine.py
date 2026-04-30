@@ -29,8 +29,7 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
     severity_factor = _calculate_severity_multiplier(data.issues)
     quality_factor = _calculate_quality_factor(data.desired_quality_level)
     issue_factor = _calculate_issue_count_factor(data.issues)
-    location_factor = _clamp(
-        ((data.labor_index * 0.6) + (data.material_index * 0.4)), 0.7, 2.5,)
+    location_factor = _resolve_cost_factor(data)
     combined_factor = severity_factor * quality_factor * issue_factor * location_factor
     combined_factor = _clamp(combined_factor, 0.85, 1.9)
 
@@ -448,6 +447,12 @@ def infer_user_scope_categories(
 ) -> list[str]:
     """Public helper for services to consistently detect explicit user-requested scope."""
     return _build_user_scope_categories(user_inputs, renovation_elements)
+
+
+def _resolve_cost_factor(data: RenovationEstimateInput) -> float:
+    if data.time_factor != 1.0 or data.location_factor != 1.0:
+        return _clamp(data.time_factor * data.location_factor, 0.7, 2.5)
+    return _clamp(((data.labor_index * 0.6) + (data.material_index * 0.4)), 0.7, 2.5)
 
 
 def _build_user_scope_work_items(categories: List[str]) -> List[str]:

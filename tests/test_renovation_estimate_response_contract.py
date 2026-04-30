@@ -112,6 +112,45 @@ def test_estimate_manual_fallback_has_no_renovated_image(client, monkeypatch):
     assert body["renovated_image_url"] is None
 
 
+def test_estimate_injects_location_indices_from_zip(client, monkeypatch):
+    captured = {}
+
+    async def fake_resolve_location_indices(zip_code: str):
+        captured["zip_code"] = zip_code
+        return SimpleNamespace(
+            labor_index=1.12,
+            time_factor=1.12,
+            location_factor=1.08,
+        )
+
+    def fake_estimate(data):
+        captured["labor_index"] = data.labor_index
+        captured["time_factor"] = data.time_factor
+        captured["location_factor"] = data.location_factor
+        return _build_estimate_fixture()
+
+    monkeypatch.setattr(renovation_service, "resolve_location_indices", fake_resolve_location_indices)
+    monkeypatch.setattr(renovation_service, "estimate_renovation_cost", fake_estimate)
+    monkeypatch.setattr(renovation_service, "apply_user_input_cost_adjustments", lambda estimate, *_args, **_kwargs: estimate)
+
+    response = client.post(
+        "/api/v1/renovation/estimate",
+        json={
+            "sqft": 1200,
+            "beds": 3,
+            "baths": 2,
+            "condition_score": 65,
+            "zip_code": "94103",
+        },
+    )
+
+    assert response.status_code == 200
+    assert captured["zip_code"] == "94103"
+    assert captured["labor_index"] == 1.12
+    assert captured["time_factor"] == 1.12
+    assert captured["location_factor"] == 1.08
+
+
 def test_estimate_validation_error_shape(client):
     response = client.post(
         "/api/v1/renovation/estimate",

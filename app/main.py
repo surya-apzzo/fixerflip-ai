@@ -19,7 +19,12 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting %s (env=%s)", settings.PROJECT_NAME, settings.ENVIRONMENT)
-    yield
+    try:
+        yield
+    finally:
+        from app.services.location_indices_service import close_http_client
+
+        await close_http_client()
 
 
 def create_app() -> FastAPI:

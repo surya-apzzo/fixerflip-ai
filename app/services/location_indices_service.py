@@ -1,18 +1,30 @@
+from __future__ import annotations
+
 import asyncio
+import json
 import logging
-from typing import Tuple, Optional
+import re
+from dataclasses import dataclass
+from typing import Any
 
 import httpx
+
 from app.core import redis_cache
 from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Cache the results for 30 days (30 * 24 * 60 * 60 seconds)
-CACHE_TTL_SECONDS = 2592000
+_http_client: httpx.AsyncClient | None = None
+_BLS_API_URL = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+_DEFAULT_TIMEOUT_SECONDS = 7.0
 
-# Global HTTP client for connection pooling (initialized lazily to avoid event loop issues)
-_http_client: Optional[httpx.AsyncClient] = None
+
+@dataclass(frozen=True)
+class CostIndexFactors:
+    labor_index: float | None = None
+    time_factor: float | None = None
+    location_factor: float | None = None
+
 
 def _get_http_client() -> httpx.AsyncClient:
     global _http_client
@@ -20,159 +32,232 @@ def _get_http_client() -> httpx.AsyncClient:
         _http_client = httpx.AsyncClient()
     return _http_client
 
+
 async def close_http_client() -> None:
-    """
-    Call this function in your FastAPI @app.on_event("shutdown") 
-    to cleanly close the connection pool and prevent memory leaks.
-    """
+    """Close the shared HTTP client during app shutdown."""
     global _http_client
     if _http_client is not None:
         await _http_client.aclose()
         _http_client = None
 
-async def _fetch_from_bls() -> Optional[float]:
-    """
-    Real integration for BLS API using httpx.
-    National average index, ignores zip code mapping unless manually provided later.
-    """
-    logger.info("Fetching national BLS data")
-    
-    api_key = getattr(settings, "BLS_API_KEY", None)
-    if not api_key:
-        logger.warning("BLS_API_KEY is missing in .env! Using fallback logic.")
-        return 1.10
-        
-    url = "https://api.bls.gov/publicAPI/v2/timeseries/data/"
+
+def _normalize_zip_code(zip_code: str) -> str:
+    raw = (zip_code or "").strip()
+    match = re.match(r"^(\d{5})(?:-\d{4})?$", raw)
+    return match.group(1) if match else ""
+
+
+def _normalize_index_multiplier(value: Any) -> float | None:
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+
+    if numeric <= 0:
+        return None
+    if numeric > 10:
+        numeric = numeric / 100.0
+    if 0.5 <= numeric <= 2.5:
+        return round(numeric, 4)
+    return None
+
+
+def _as_mapping(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _first_present(data: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    for key in keys:
+        if key in data:
+            return data[key]
+    nested = _as_mapping(data.get("data"))
+    for key in keys:
+        if key in nested:
+            return nested[key]
+    indices = _as_mapping(data.get("indices"))
+    for key in keys:
+        if key in indices:
+            return indices[key]
+    return None
+
+
+def _extract_bls_latest_wage(data: dict[str, Any]) -> float | None:
+    results = data.get("Results")
+    if isinstance(results, list) and results:
+        results = results[0]
+    series = _as_mapping(results).get("series")
+    if not isinstance(series, list) or not series:
+        return None
+    observations = _as_mapping(series[0]).get("data")
+    if not isinstance(observations, list) or not observations:
+        return None
+    try:
+        return float(observations[0]["value"])
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _parse_rsmeans_location_factor(data: dict[str, Any]) -> float | None:
+    location_raw = _first_present(
+        data,
+        (
+            "locationFactor",
+            "location_factor",
+            "totalIndex",
+            "total_index",
+            "totalWeightedAverage",
+            "total_weighted_average",
+            "costIndex",
+            "cost_index",
+            "regionalFactor",
+            "regional_factor",
+            "location",
+            "total",
+        ),
+    )
+    return _normalize_index_multiplier(location_raw)
+
+
+async def _fetch_bls_labor_index() -> float | None:
+    series_id = settings.BLS_CONSTRUCTION_WAGE_SERIES_ID
+    if not series_id:
+        return None
+
+    payload: dict[str, Any] = {"seriesid": [series_id]}
+    if settings.BLS_API_KEY:
+        payload["registrationkey"] = settings.BLS_API_KEY
+
     client = _get_http_client()
-    
     for attempt in range(2):
         try:
-            payload = {
-                "seriesid": ["CEU2000000008"], 
-                "registrationkey": api_key
-            }
-            # Shorter timeout: BLS shouldn't take more than 5s
-            response = await client.post(url, json=payload, timeout=5.0)
+            response = await client.post(_BLS_API_URL, json=payload, timeout=5.0)
             response.raise_for_status()
-            data = response.json()
-            
-            series = data.get("Results", {}).get("series", [])
-            if not series or not series[0].get("data"):
-                logger.warning("BLS response missing expected data structure. Keys: %s", list(data.keys()))
+            parsed = response.json()
+            if parsed.get("status") and parsed.get("status") != "REQUEST_SUCCEEDED":
+                logger.warning("BLS request did not succeed: %s", parsed.get("message"))
                 return None
-                
-            raw_value = float(series[0]["data"][0]["value"])
-            
-            # CEU2000000008 returns average hourly earnings in dollars
-            # We normalize it against a national base wage to get an index
-            base_wage = getattr(settings, "BLS_BASE_WAGE", 34.50)
-            return raw_value / base_wage
-            
-        except Exception as e:
-            logger.warning("BLS attempt %s failed: %s", attempt + 1, e)
+
+            current_wage = _extract_bls_latest_wage(parsed)
+            if current_wage is None:
+                logger.warning("BLS response did not include latest wage data.")
+                return None
+            return _normalize_index_multiplier(current_wage / settings.BLS_BASE_WAGE)
+        except Exception as exc:
+            logger.warning("BLS labor index attempt %s failed: %s", attempt + 1, exc)
             if attempt == 1:
-                logger.error("BLS API Error (Final): %s", e)
                 return None
-            await asyncio.sleep(0.2) # Jitter/delay before retry
+            await asyncio.sleep(0.2)
+    return None
 
 
-async def _fetch_from_rsmeans(zip_code: str) -> Optional[float]:
-    """
-    Real integration for RSMeans API using httpx.
-    """
-    logger.info("Fetching RSMeans data for zip: %s", zip_code)
-    
-    api_key = getattr(settings, "RSMEANS_API_KEY", None)
-    if not api_key:
-        logger.warning("RSMEANS_API_KEY is missing in .env! Using fallback logic.")
-        return 1.05 # Removed geographic bias from fallback to avoid inaccurate assumptions
-        
-    # Replace this URL with the exact endpoint provided by Gordian/RSMeans
-    url = f"https://api.rsmeans.com/v1/cost-indices/{zip_code}"
+def _build_rsmeans_url(zip_code: str) -> str:
+    base_url = settings.RSMEANS_BASE_URL.rstrip("/")
+    if "{zip_code}" in base_url:
+        return base_url.replace("{zip_code}", zip_code)
+    return f"{base_url}/cost-indices/{zip_code}"
+
+
+async def _fetch_rsmeans_location_factor(zip_code: str) -> float | None:
+    if not settings.RSMEANS_API_KEY or not settings.RSMEANS_BASE_URL:
+        return None
+
+    url = _build_rsmeans_url(zip_code)
+    headers = {
+        "Authorization": f"Bearer {settings.RSMEANS_API_KEY}",
+        "Accept": "application/json",
+    }
     client = _get_http_client()
-    
     for attempt in range(2):
         try:
-            headers = {
-                "Authorization": f"Bearer {api_key}",
-                "Accept": "application/json"
-            }
-            # RSMeans timeout set to 7s
-            response = await client.get(url, headers=headers, timeout=7.0)
+            response = await client.get(url, headers=headers, timeout=_DEFAULT_TIMEOUT_SECONDS)
             response.raise_for_status()
-            data = response.json()
-            
-            # Safely extract from RSMeans JSON. You must adjust this exact path
-            if "materialIndex" in data:
-                return float(data["materialIndex"])
-            elif "costIndex" in data:
-                return float(data["costIndex"])
-            elif "data" in data and "costIndex" in data["data"]:
-                return float(data["data"]["costIndex"])
-                
-            logger.warning("RSMeans response did not contain expected fields. Keys: %s", list(data.keys()))
-            return None
-            
-        except Exception as e:
-            logger.warning("RSMeans attempt %s failed for zip %s: %s", attempt + 1, zip_code, e)
-            if attempt == 1:
-                logger.error("RSMeans API Error (Final) for zip %s: %s", zip_code, e)
+            parsed = response.json()
+            if not isinstance(parsed, dict):
+                logger.warning("RSMeans response was not a JSON object.")
                 return None
-            await asyncio.sleep(0.2) # Jitter/delay before retry
+            location_factor = _parse_rsmeans_location_factor(parsed)
+            if location_factor is None:
+                logger.warning("RSMeans response did not contain a location factor field.")
+            return location_factor
+        except Exception as exc:
+            logger.warning("RSMeans index attempt %s failed for ZIP %s: %s", attempt + 1, zip_code, exc)
+            if attempt == 1:
+                return None
+            await asyncio.sleep(0.2)
+    return None
 
 
-async def _fetch_from_bls_cached() -> Optional[float]:
-    cache_key = "renovation:indices:bls_national"
+def _cache_ttl_seconds() -> int:
+    return settings.LOCATION_INDEX_CACHE_TTL_SECONDS
+
+
+async def _get_cached_text(cache_key: str) -> str | None:
     try:
-        cached_val = await asyncio.to_thread(redis_cache.get_text, cache_key)
-        if cached_val:
-            return float(cached_val)
-    except Exception as e:
-        logger.warning("Failed to parse cached BLS index: %s", e)
-
-    val = await _fetch_from_bls()
-    if val is not None:
-        await asyncio.to_thread(redis_cache.set_text, cache_key, str(val), CACHE_TTL_SECONDS)
-    return val
+        return await asyncio.to_thread(redis_cache.get_text, cache_key)
+    except Exception:
+        return None
 
 
-async def _fetch_from_rsmeans_cached(zip_code: str) -> Optional[float]:
-    cache_key = f"renovation:indices:rsmeans:{zip_code}"
+async def _set_cached_text(cache_key: str, value: str) -> None:
     try:
-        cached_val = await asyncio.to_thread(redis_cache.get_text, cache_key)
-        if cached_val:
-            return float(cached_val)
-    except Exception as e:
-        logger.warning("Failed to parse cached RSMeans index for %s: %s", zip_code, e)
-
-    val = await _fetch_from_rsmeans(zip_code)
-    if val is not None:
-        await asyncio.to_thread(redis_cache.set_text, cache_key, str(val), CACHE_TTL_SECONDS)
-    return val
+        await asyncio.to_thread(redis_cache.set_text, cache_key, value, _cache_ttl_seconds())
+    except Exception:
+        return
 
 
-async def resolve_location_indices(zip_code: str) -> Tuple[Optional[float], Optional[float]]:
+async def _fetch_bls_labor_index_cached() -> float | None:
+    cache_key = f"renovation:indices:bls:{settings.BLS_CONSTRUCTION_WAGE_SERIES_ID}"
+    cached = await _get_cached_text(cache_key)
+    if cached:
+        return _normalize_index_multiplier(cached)
+
+    labor_index = await _fetch_bls_labor_index()
+    if labor_index is not None:
+        await _set_cached_text(cache_key, str(labor_index))
+    return labor_index
+
+
+async def _fetch_rsmeans_location_factor_cached(zip_code: str) -> float | None:
+    cache_key = f"renovation:indices:rsmeans_location:{zip_code}"
+    cached = await _get_cached_text(cache_key)
+    if cached:
+        return _normalize_index_multiplier(cached)
+
+    location_factor = await _fetch_rsmeans_location_factor(zip_code)
+    if location_factor is not None:
+        await _set_cached_text(cache_key, json.dumps(location_factor))
+    return location_factor
+
+
+async def resolve_location_indices(zip_code: str) -> CostIndexFactors:
     """
-    Takes a zip code, checks individual caches, and if not found, calls BLS and RSMeans.
-    Returns (labor_index, material_index).
+    Resolve cost factors without cross-provider fallback.
+
+    BLS supplies labor_index/time_factor as current_wage / base_wage.
+    RSMeans/Gordian supplies the regional location_factor for the ZIP code.
     """
-    if not zip_code or not zip_code.strip():
-        return None, None
-        
-    zip_code = zip_code.strip()
-    
-    # Fetch in parallel. The individual cached functions handle their own caching logic independently.
-    labor_task = asyncio.create_task(_fetch_from_bls_cached())
-    material_task = asyncio.create_task(_fetch_from_rsmeans_cached(zip_code))
-    
-    results = await asyncio.gather(labor_task, material_task, return_exceptions=True)
-    
-    labor_idx = results[0] if not isinstance(results[0], Exception) else None
-    material_idx = results[1] if not isinstance(results[1], Exception) else None
-    
-    if isinstance(results[0], Exception):
-        logger.error("BLS parallel task failed: %s", results[0])
-    if isinstance(results[1], Exception):
-        logger.error("RSMeans parallel task failed for %s: %s", zip_code, results[1])
-        
-    return labor_idx, material_idx
+    normalized_zip = _normalize_zip_code(zip_code)
+    if not normalized_zip:
+        return CostIndexFactors()
+
+    bls_task = asyncio.create_task(_fetch_bls_labor_index_cached())
+    rsmeans_task = asyncio.create_task(_fetch_rsmeans_location_factor_cached(normalized_zip))
+    bls_result, rsmeans_result = await asyncio.gather(
+        bls_task,
+        rsmeans_task,
+        return_exceptions=True,
+    )
+
+    labor_index = None if isinstance(bls_result, Exception) else bls_result
+    location_factor = None if isinstance(rsmeans_result, Exception) else rsmeans_result
+
+    if isinstance(bls_result, Exception):
+        logger.warning("BLS labor index task failed: %s", bls_result)
+    if isinstance(rsmeans_result, Exception):
+        logger.warning("RSMeans location factor task failed for ZIP %s: %s", normalized_zip, rsmeans_result)
+
+    return CostIndexFactors(
+        labor_index=labor_index,
+        time_factor=labor_index,
+        location_factor=location_factor,
+    )

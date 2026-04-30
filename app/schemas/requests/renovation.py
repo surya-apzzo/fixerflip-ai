@@ -27,6 +27,8 @@ class RenovationEstimateRequest(BaseModel):
     desired_quality_level: str = "standard"
     labor_index: float = DEFAULT_ADMIN_LABOR_INDEX
     material_index: float = DEFAULT_ADMIN_MATERIAL_INDEX
+    time_factor: float = 1.0
+    location_factor: float = 1.0
     type_of_renovation: str = "interior"
     visual_type: str = "select_elements_to_renovate"
     reference_image_url: str = ""
