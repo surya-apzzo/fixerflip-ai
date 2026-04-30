@@ -78,6 +78,11 @@ _ELEMENT_HINTS = {
     "paint": "wall and ceiling paint finish",
     "lighting": "light fixtures and lighting look",
     "furniture": "furniture style and condition",
+    "roof": "roof shingles and roofline finish",
+    "cabinet": "kitchen or bathroom cabinetry fronts",
+    "window": "window frames and glass panes",
+    "stair": "staircase steps, railing, and finish",
+    "door": "interior and exterior doors",
 }
 
 _ELEMENT_ACTION_HINTS = {
@@ -96,6 +101,21 @@ _ELEMENT_ACTION_HINTS = {
     "furniture": (
         "Furniture directive: update only furniture look/style/finish of existing furniture in place. "
         "Do not add extra furniture pieces and do not alter architecture, cabinetry, walls, or flooring."
+    ),
+    "roof": (
+        "Roof directive: visibly update the roof covering material and color. Preserve the structural roofline and the rest of the exterior unchanged."
+    ),
+    "cabinet": (
+        "Cabinet directive: update the look, color, and finish of existing cabinets. Do not change the layout or surrounding walls and floors."
+    ),
+    "window": (
+        "Window directive: update window frames or styles. Keep the wall structure and surrounding exterior/interior untouched."
+    ),
+    "stair": (
+        "Stair directive: visibly update the staircase treads, risers, and railing style. Leave surrounding walls and flooring intact."
+    ),
+    "door": (
+        "Door directive: update the style, color, or material of visible doors. Do not alter the surrounding walls or structural openings."
     ),
 }
 

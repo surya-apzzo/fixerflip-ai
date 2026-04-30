@@ -272,6 +272,25 @@ def _build_renovation_estimate_input(
 
 async def build_renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
     payload = validate_and_normalize_renovation_payload(payload)
+
+    # --- DYNAMIC LOCATION INDICES INJECTION ---
+    # If the user provides a zip code, we overwrite the default 1.10/1.05 indices
+    # with real data from our BLS and RSMeans integration.
+    if payload.zip_code:
+        from app.services.location_indices_service import resolve_location_indices
+        dynamic_labor, dynamic_material = await resolve_location_indices(payload.zip_code)
+        
+        updates = {}
+        if dynamic_labor is not None:
+            updates["labor_index"] = dynamic_labor
+        if dynamic_material is not None:
+            updates["material_index"] = dynamic_material
+            
+        if updates:
+            # Overwrite the payload with the new dynamic zip-code based numbers
+            payload = payload.model_copy(update=updates)
+    # ------------------------------------------
+
     pipeline_warnings: list[str] = []
     renovated_image_url: str | None = None
     user_scope_categories = infer_user_scope_categories(

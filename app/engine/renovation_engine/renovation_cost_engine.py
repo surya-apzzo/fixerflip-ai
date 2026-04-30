@@ -157,6 +157,11 @@ _ELEMENT_SELECTION_SCOPE_PHRASES: dict[str, str] = {
     "paint": "new paint",
     "lighting": "electrical upgrade",
     "furniture": "furniture refresh",
+    "roof": "new roof",
+    "cabinet": "new cabinets",
+    "window": "new windows",
+    "stair": "staircase upgrade",
+    "door": "new doors",
 }
 
 _SELECTED_ELEMENT_TO_COST_CATEGORY: dict[str, str] = {
@@ -164,6 +169,11 @@ _SELECTED_ELEMENT_TO_COST_CATEGORY: dict[str, str] = {
     "paint": "paint",
     "lighting": "electrical",
     "furniture": "paint",
+    "roof": "roof",
+    "cabinet": "kitchen",
+    "window": "window",
+    "stair": "flooring",
+    "door": "doors",
 }
 
 _SELECTED_ELEMENT_TO_IMPACTED_LABEL: dict[str, str] = {
@@ -171,6 +181,11 @@ _SELECTED_ELEMENT_TO_IMPACTED_LABEL: dict[str, str] = {
     "paint": "paint finish",
     "lighting": "lighting",
     "furniture": "furniture",
+    "roof": "roof",
+    "cabinet": "cabinets",
+    "window": "windows",
+    "stair": "stairs",
+    "door": "doors",
 }
 
 INTENT_MAP = {
