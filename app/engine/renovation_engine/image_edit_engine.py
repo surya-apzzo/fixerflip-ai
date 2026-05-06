@@ -1,6 +1,8 @@
 """Image edit engine: OpenAI -> Image."""
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 from pathlib import Path
 from urllib.parse import quote, urlparse
@@ -11,6 +13,8 @@ from openai import AsyncOpenAI
 from app.core import redis_cache
 from app.core.config import settings
 from app.schemas import ImageEditResult
+
+logger = logging.getLogger(__name__)
 
 _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 _EDIT_PROMPT_BASE = _PROMPTS_DIR / "editing_image_visual.txt"
@@ -36,6 +40,19 @@ _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
 )
+
+_OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS = 60.0
+_OPENAI_IMAGE_EDIT_MAX_RETRIES = 1
+_OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS = 0.8
+
+
+def _is_retryable_openai_exception(exc: Exception) -> bool:
+    retryable_names = {"RateLimitError", "APIConnectionError", "APITimeoutError", "InternalServerError"}
+    return exc.__class__.__name__ in retryable_names
+
+
+async def _wait_for_retry_backoff(attempt: int) -> None:
+    await asyncio.sleep(_OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS * (2**attempt))
 
 
 def _build_image_download_headers(image_url: str) -> dict[str, str]:
@@ -341,12 +358,15 @@ async def edit_property_image_from_url(
     if not instruction.strip():
         raise ValueError("instruction is required.")
 
-    image_bytes: bytes | None = None
-    media_type = "image/png"
     try:
         image_bytes, media_type = await _download_source_image(image_url.strip())
-    except Exception:
-        pass
+    except Exception as exc:
+        logger.warning("Source image download failed for edit (url=%s): %s", image_url, exc)
+        raise ValueError(
+            "Image URL could not be downloaded for structure-preserving edit. "
+            "Check that the URL is public/reachable, or configure IMAGE_DOWNLOAD_REFERER / "
+            "IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
+        ) from exc
 
     prompt_template = _load_edit_prompt_text()
     constraints = (
@@ -356,35 +376,44 @@ async def edit_property_image_from_url(
     )
     prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
 
-    client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-    if image_bytes is None:
-        raise ValueError(
-            "Image URL could not be downloaded for structure-preserving edit. "
-            "Skipping generative fallback to avoid non-requested scene changes."
-        )
+    client = AsyncOpenAI(
+        api_key=settings.OPENAI_API_KEY,
+        timeout=_OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS,
+        max_retries=0,
+    )
 
-    try:
-        response = await client.images.edit(
-            model=settings.default_openai_image_edit_model,
-            image=("property_image.png", image_bytes, media_type),
-            prompt=prompt,
-            size="auto",
-        )
+    last_exc: Exception | None = None
+    for attempt in range(_OPENAI_IMAGE_EDIT_MAX_RETRIES + 1):
+        try:
+            response = await client.images.edit(
+                model=settings.default_openai_image_edit_model,
+                image=("property_image.png", image_bytes, media_type),
+                prompt=prompt,
+                size="auto",
+            )
 
-        data = getattr(response, "data", None) or []
-        if not data or not getattr(data[0], "b64_json", None):
-            raise ValueError("Image edit failed: no image returned.")
-        first = data[0]
-        revised_prompt = getattr(first, "revised_prompt", "") or prompt
-        return ImageEditResult(
-            revised_prompt=revised_prompt,
-            image_base64=first.b64_json,
-            media_type="image/png",
-        )
-    except Exception as exc:
-        raise ValueError(
-            "Image edit request failed. Skipping generative fallback to avoid non-requested scene changes."
-        ) from exc
+            data = getattr(response, "data", None) or []
+            if not data or not getattr(data[0], "b64_json", None):
+                raise ValueError("Image edit failed: no image returned.")
+            first = data[0]
+            revised_prompt = getattr(first, "revised_prompt", "") or prompt
+            return ImageEditResult(
+                revised_prompt=revised_prompt,
+                image_base64=first.b64_json,
+                media_type="image/png",
+            )
+        except Exception as exc:
+            last_exc = exc
+            is_retryable = _is_retryable_openai_exception(exc)
+            if attempt < _OPENAI_IMAGE_EDIT_MAX_RETRIES and is_retryable:
+                await _wait_for_retry_backoff(attempt)
+                continue
+            raise ValueError(
+                "Image edit request failed. Retry later. "
+                "If this repeats, inspect server logs for the upstream OpenAI error."
+            ) from exc
+
+    raise ValueError("Image edit request failed.") from last_exc
 
 
 async def _download_source_image(image_url: str) -> tuple[bytes, str]:

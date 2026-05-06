@@ -32,7 +32,7 @@ def _build_public_url(key: str) -> str:
 
 def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) -> str:
     import boto3
-    print("Using endpoint:", settings.STORAGE_ENDPOINT_URL)
+    logger.debug("Uploading renovated image to storage endpoint=%s bucket=%s key=%s", settings.STORAGE_ENDPOINT_URL, settings.STORAGE_BUCKET_NAME, key)
 
     client = boto3.client(
         "s3",

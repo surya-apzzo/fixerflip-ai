@@ -41,6 +41,7 @@ _SEVERITY_RANK = {"severe": 0, "moderate": 1, "minor": 2}
 _VISION_FALLBACK_SCORE = 65
 _VISION_MAX_RETRIES = 2
 _VISION_RETRY_BACKOFF_SECONDS = 0.75
+_OPENAI_VISION_TIMEOUT_SECONDS = 20.0
 
 _VISION_DISABLED_REASON = "vision_unavailable"
 _VISION_INVALID_OUTPUT_REASON = "invalid_model_output"
@@ -78,7 +79,11 @@ async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | Non
         model_candidates.append(fallback_model)
     try:
         prompt = _load_condition_prompt()
-        client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        client = AsyncOpenAI(
+            api_key=settings.OPENAI_API_KEY,
+            timeout=_OPENAI_VISION_TIMEOUT_SECONDS,
+            max_retries=0,
+        )
         last_failed_model: str | None = None
         for model_name in model_candidates:
             for attempt in range(_VISION_MAX_RETRIES + 1):

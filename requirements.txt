@@ -7,6 +7,10 @@ openai>=1.51.0
 aiofiles>=23.0.0
 redis>=5.0.0
 Pillow>=12.0.0
+torch>=2.3.0
+torchvision>=0.18.0
+clip-by-openai>=1.1
+python-multipart>=0.0.9
 
 # Dev Dependencies
 pytest>=7.4.4
@@ -14,3 +18,6 @@ pytest-asyncio>=0.23.3
 httpx>=0.26.0
 ruff>=0.1.14
 black>=24.1.0
+
+# Optional dependencies for AWS S3 support
+boto3==1.42.93
