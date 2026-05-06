@@ -8,11 +8,11 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.image_condition.services.image_filter import FilteredImage
+from app.engine.image_condition.services.image_filter import FilteredImage
 
 logger = logging.getLogger(__name__)
 
-_PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "property_condition_vision_prompt.txt"
+_PROMPT_PATH = Path(__file__).resolve().parents[3] / "prompts" / "property_condition_vision_prompt.txt"
 
 _VISION_PROMPT_FALLBACK = """
 You are a real estate flip analyst scoring property condition from photos.

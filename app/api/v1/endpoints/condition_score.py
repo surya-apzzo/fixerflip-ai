@@ -2,9 +2,9 @@ from __future__ import annotations
 
 from fastapi import APIRouter
 
-from app.image_condition.services.aggregator import aggregate
-from app.image_condition.services.image_filter import classify_and_filter
-from app.image_condition.services.vision_scorer import score_from_images
+from app.engine.image_condition.services.aggregator import aggregate
+from app.engine.image_condition.services.image_filter import classify_and_filter
+from app.engine.image_condition.services.vision_scorer import score_from_images
 from app.schemas.requests.property_condition import ConditionScoreRequest
 from app.schemas.responses.property_condition import ConditionScoreResponse
 
