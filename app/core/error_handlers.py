@@ -5,6 +5,7 @@ from fastapi import FastAPI, HTTPException, Request, status
 from fastapi.exception_handlers import http_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.core.config import settings
 
@@ -31,6 +32,22 @@ def _validation_error_content(errors: list[dict[str, Any]]) -> dict[str, dict[st
 
 
 def register_exception_handlers(app: FastAPI) -> None:
+    @app.exception_handler(StarletteHTTPException)
+    async def starlette_http_exception_handler(
+        request: Request, exc: StarletteHTTPException
+    ) -> JSONResponse:
+        if exc.status_code == status.HTTP_404_NOT_FOUND:
+            return JSONResponse(
+                status_code=status.HTTP_404_NOT_FOUND,
+                content={
+                    "detail": {
+                        "code": "NOT_FOUND",
+                        "errors": [{"field": "url", "message": "URL is not found."}],
+                    }
+                },
+            )
+        return await http_exception_handler(request, exc)
+
     @app.exception_handler(RequestValidationError)
     async def validation_exception_handler(
         request: Request, exc: RequestValidationError

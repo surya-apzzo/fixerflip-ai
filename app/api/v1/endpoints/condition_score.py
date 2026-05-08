@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from app.engine.image_condition.services.aggregator import aggregate
 from app.engine.image_condition.services.image_filter import classify_and_filter
@@ -15,6 +15,27 @@ router = APIRouter()
 async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreResponse:
     filter_result = classify_and_filter(payload.image_urls)
     selected = filter_result["selected"]
+    total_input = int(filter_result.get("total_input", len(payload.image_urls)))
+    discarded_count = int(filter_result.get("discarded_count", 0))
+
+    if total_input > 0 and not selected:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "VALIDATION_ERROR",
+                "errors": [
+                    {
+                        "field": "image_urls",
+                        "message": "No usable property images found. Verify image URLs are valid and publicly accessible.",
+                    }
+                ],
+                "meta": {
+                    "total_input": total_input,
+                    "images_discarded": discarded_count,
+                },
+            },
+        )
+
     vision_result = await score_from_images(selected)
     final = aggregate(vision_result)
 
@@ -29,7 +50,7 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
         caution_signals=final["caution_signals"],
         red_flags=final["red_flags"],
         images_analyzed=len(selected),
-        images_discarded=int(filter_result["discarded_count"]),
+        images_discarded=discarded_count,
         cost_usd=final["cost_usd"],
     )
 

@@ -75,3 +75,34 @@ def test_condition_score_contract(client, monkeypatch):
     assert body["images_discarded"] == 2
     assert body["cost_usd"] == 0.00021
 
+
+def test_condition_score_returns_validation_error_when_all_urls_unusable(client, monkeypatch):
+    monkeypatch.setattr(
+        condition_endpoint,
+        "classify_and_filter",
+        lambda _urls: {
+            "selected": [],
+            "discarded_count": 3,
+            "total_input": 3,
+        },
+    )
+
+    response = client.post(
+        "/api/v1/condition-score",
+        json={
+            "property_id": "prop_001",
+            "image_urls": [
+                "https://bad.example.com/1.jpg",
+                "https://bad.example.com/2.jpg",
+                "https://bad.example.com/3.jpg",
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert detail["code"] == "VALIDATION_ERROR"
+    assert detail["errors"][0]["field"] == "image_urls"
+    assert "No usable property images found" in detail["errors"][0]["message"]
+    assert detail["meta"]["total_input"] == 3
+    assert detail["meta"]["images_discarded"] == 3
