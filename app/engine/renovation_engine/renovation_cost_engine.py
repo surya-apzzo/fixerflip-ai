@@ -1030,6 +1030,7 @@ def _estimate_timeline_weeks(
     return base, base + 4
 
 
+#confidence score is a measure of the confidence in the renovation estimate
 def _calculate_confidence_score(
     *,
     condition_score: int,

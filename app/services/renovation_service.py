@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import time
 
 from app.engine.renovation_engine.image_condition_engine import ImageConditionResult
 from app.engine.renovation_engine.image_edit_engine import (
@@ -300,8 +301,24 @@ def _resolve_cost_adjustment_factor(payload: RenovationEstimateRequest) -> float
 
 
 async def build_renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
+    started = time.perf_counter()
+    logger.info(
+        "Renovation estimate request start has_image=%s zip=%s sqft=%s beds=%s baths=%s elements=%s",
+        bool((payload.image_url or "").strip()),
+        (payload.zip_code or "").strip() or None,
+        payload.sqft,
+        payload.beds,
+        payload.baths,
+        len(payload.renovation_elements or []),
+    )
+
+    t0 = time.perf_counter()
     payload = validate_and_normalize_renovation_payload(payload)
+    logger.debug("Renovation payload validated in %.1fms", (time.perf_counter() - t0) * 1000)
+
+    t1 = time.perf_counter()
     payload = await _apply_dynamic_location_indices(payload)
+    logger.debug("Renovation location indices resolved in %.1fms", (time.perf_counter() - t1) * 1000)
 
     pipeline_warnings: list[str] = []
     renovated_image_url: str | None = None
@@ -312,13 +329,28 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
 
     if payload.image_url:
         resolved_target_style = _resolve_target_style(payload)
+        t2 = time.perf_counter()
         image_condition = await _resolve_image_condition(payload, pipeline_warnings)
+        logger.debug(
+            "Renovation vision resolved in %.1fms status=%s issues=%s room=%s",
+            (time.perf_counter() - t2) * 1000,
+            getattr(image_condition, "analysis_status", "unknown"),
+            len(getattr(image_condition, "issues", []) or []),
+            getattr(image_condition, "room_type", "unknown"),
+        )
+
+        t3 = time.perf_counter()
         renovated_image_url = await _generate_renovated_image_url(
             payload=payload,
             image_condition=image_condition,
             resolved_target_style=resolved_target_style,
             user_scope_categories=user_scope_categories,
             pipeline_warnings=pipeline_warnings,
+        )
+        logger.debug(
+            "Renovation image edit/upload pipeline completed in %.1fms returned_url=%s",
+            (time.perf_counter() - t3) * 1000,
+            bool(renovated_image_url),
         )
     else:
         manual_condition_score = payload.condition_score
@@ -333,6 +365,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         )
         resolved_target_style = _resolve_target_style(payload)
 
+    t4 = time.perf_counter()
     estimate_input = _build_renovation_estimate_input(
         payload,
         image_condition=image_condition,
@@ -340,6 +373,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     )
     estimate = estimate_renovation_cost(estimate_input)
     location_factor = _resolve_cost_adjustment_factor(payload)
+    logger.debug("Renovation base estimate computed in %.1fms", (time.perf_counter() - t4) * 1000)
 
     if payload.renovation_elements:
         estimate = estimate.model_copy(
@@ -381,7 +415,15 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     if pipeline_warnings:
         estimate = estimate.model_copy(update={"assumptions": [*estimate.assumptions, *pipeline_warnings]})
 
-    return build_renovation_estimate_response(
+    response = build_renovation_estimate_response(
         estimate,
         renovated_image_url=renovated_image_url,
     )
+    logger.info(
+        "Renovation estimate request end class=%s range=%s warnings=%s duration_ms=%.1f",
+        getattr(response, "renovation_class", None),
+        getattr(response, "estimated_renovation_range", None),
+        len(pipeline_warnings),
+        (time.perf_counter() - started) * 1000,
+    )
+    return response
