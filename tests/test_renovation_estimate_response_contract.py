@@ -88,7 +88,7 @@ def test_estimate_response_contract_shape(client, monkeypatch):
     assert body["estimated_timeline"] == "6-10 weeks"
     assert body["confidence_score"] == "82%"
     assert body["renovated_image_url"] == "https://example.com/renovated.png"
-    assert "possible systems review" in body["suggested_work_items"]
+    assert body["suggested_work_items"] == ["paint", "flooring", "kitchen update", "bathroom update"]
 
 
 def test_estimate_manual_fallback_has_no_renovated_image(client, monkeypatch):
@@ -231,3 +231,45 @@ def test_validation_rules_can_be_overridden_dynamically(client, monkeypatch):
     detail = response.json().get("detail", {})
     assert detail.get("code") == "VALIDATION_ERROR"
     assert {"field": "sqft", "message": "sqft must be >= 1500"} in detail.get("errors", [])
+
+
+def test_estimate_includes_selected_and_issue_work_items(client):
+    response = client.post(
+        "/api/v1/renovation/estimate",
+        json={
+            "sqft": 1200,
+            "beds": 3,
+            "baths": 2,
+            "condition_score": 55,
+            "issues": ["water damage"],
+            "room_type": "kitchen",
+            "renovation_elements": ["paint"],
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert "paint renovation" in body["suggested_work_items"]
+    assert "water/moisture remediation" in body["suggested_work_items"]
+
+
+def test_estimate_work_items_are_unique_for_selected_and_issue_overlap(client):
+    response = client.post(
+        "/api/v1/renovation/estimate",
+        json={
+            "sqft": 1200,
+            "beds": 3,
+            "baths": 2,
+            "condition_score": 55,
+            "issues": ["paint wear", "floor damage", "water damage"],
+            "room_type": "kitchen",
+            "renovation_elements": ["paint", "flooring"],
+        },
+    )
+
+    assert response.status_code == 200
+    work_items = response.json()["suggested_work_items"]
+    assert "paint renovation" in work_items
+    assert "flooring renovation" in work_items
+    assert "paint" not in work_items
+    assert "flooring" not in work_items

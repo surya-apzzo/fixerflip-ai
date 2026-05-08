@@ -95,7 +95,10 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
     user_work_items = _build_user_scope_work_items(user_scope_categories)
     issue_work_items = _build_suggested_work_items(data.issues, data.room_type)
     if selected_work_items:
-        suggested_work_items = selected_work_items
+        merged_items = [*selected_work_items, *user_work_items]
+        if data.issues:
+            merged_items.extend(issue_work_items)
+        suggested_work_items = _deduplicate_work_items(merged_items)
     elif data.issues and user_work_items:
         # For damaged properties, user-requested upgrades are additive and must not hide remediation scope.
         suggested_work_items = _deduplicate_work_items([*issue_work_items, *user_work_items])
@@ -1246,11 +1249,30 @@ def _build_selected_work_items(renovation_elements: List[str]) -> List[str]:
     return items[:8]
 
 
+def _canonical_work_item_key(item: str) -> str:
+    key = _normalize_token_text(item)
+    if not key:
+        return ""
+    for suffix in (
+        " renovation",
+        " update",
+        " upgrades",
+        " upgrade",
+        " repairs",
+        " repair",
+        " refresh",
+    ):
+        if key.endswith(suffix):
+            key = key[: -len(suffix)].strip()
+            break
+    return key
+
+
 def _deduplicate_work_items(items: List[str]) -> List[str]:
     seen: set[str] = set()
     deduped: list[str] = []
     for item in items:
-        key = _normalize_token_text(item)
+        key = _canonical_work_item_key(item)
         if not key or key in seen:
             continue
         seen.add(key)
