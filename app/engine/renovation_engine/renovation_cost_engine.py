@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import logging
 import re
+from dataclasses import dataclass
 from typing import List, Literal, Tuple
 
-from app.core.rules_config import COST_MAP, ISSUE_COST_WEIGHT
+from app.core.rules_config import COST_MAP, ISSUE_COST_WEIGHT, ROOM_AREA_RATIO_RANGES
 from app.engine.renovation_engine.score_from_issues import (
     compute_gap_score,
     compute_renovation_age_detection,
@@ -24,7 +25,114 @@ from app.schemas import (
 logger = logging.getLogger(__name__)
 
 
-def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimate:
+@dataclass(frozen=True, slots=True)
+class RenovationSqftContext:
+    """Living-area totals vs room-heuristic effective sqft used for localized trades."""
+
+    total_sqft: float
+    effective_sqft: float
+    primary_room: str | None
+    ratio_mid: float | None
+
+
+_WHOLE_HOME_SQFT_CATEGORIES = frozenset(
+    {"roof", "exterior", "foundation", "hvac", "window", "doors", "garage", "landscaping"}
+)
+
+_ROOM_LABEL_TO_CANONICAL: dict[str, str] = {
+    "kitchen": "kitchen",
+    "living": "living_room",
+    "living room": "living_room",
+    "living_room": "living_room",
+    "bedroom": "bedroom",
+    "bedrooms": "bedroom",
+    "bathroom": "bathroom",
+    "bathrooms": "bathroom",
+    "bath": "bathroom",
+    "dining": "dining_room",
+    "dining room": "dining_room",
+    "dining_room": "dining_room",
+    "basement": "basement",
+    "hall": "hall",
+    "hallway": "hall",
+}
+
+
+def _parse_primary_room_for_ratio(room_type: str) -> str | None:
+    raw_rt = (room_type or "").strip().lower()
+    if not raw_rt:
+        return None
+    for segment in re.split(r"[,;/]", raw_rt):
+        seg = re.sub(r"\s+", " ", segment.strip())
+        if not seg:
+            continue
+        seg_under = seg.replace(" ", "_")
+        for key in (seg, seg_under, seg.replace("_", " ")):
+            canon = _ROOM_LABEL_TO_CANONICAL.get(key)
+            if canon and canon in ROOM_AREA_RATIO_RANGES:
+                return canon
+            if key in ROOM_AREA_RATIO_RANGES:
+                return key
+        for canon_key in ROOM_AREA_RATIO_RANGES:
+            nk = canon_key.replace("_", " ")
+            if canon_key in seg_under or nk in seg or seg_under.startswith(canon_key):
+                return canon_key
+    return None
+
+
+def build_renovation_sqft_context(total_sqft: float, room_type: str) -> RenovationSqftContext:
+    """
+    Derive effective renovation sqft from total living area and detected/named primary room.
+
+    Whole-property signals (roof, envelope, etc.) still use ``total_sqft`` inside line-item logic.
+    """
+    total = max(float(total_sqft), 1.0)
+    primary = _parse_primary_room_for_ratio(room_type)
+    if primary is None:
+        return RenovationSqftContext(
+            total_sqft=total,
+            effective_sqft=total,
+            primary_room=None,
+            ratio_mid=None,
+        )
+    lo, hi = ROOM_AREA_RATIO_RANGES[primary]
+    mid = (lo + hi) / 2.0
+    effective = max(round(total * mid, 4), 1.0)
+    return RenovationSqftContext(
+        total_sqft=total,
+        effective_sqft=effective,
+        primary_room=primary,
+        ratio_mid=mid,
+    )
+
+
+def _sqft_for_room_timeline(ctx: RenovationSqftContext) -> float:
+    """
+    Sqft basis for schedule duration: room-scoped labor area, not necessarily full listing sqft.
+
+    Condition vision is usually one room per photo. When we resolve a ``primary_room``, use its
+    ratio-derived ``effective_sqft``. When the room label is unknown, avoid stretching timelines as if
+    the entire living-area sqft were being renovated at once.
+    """
+    if ctx.primary_room is not None:
+        return ctx.effective_sqft
+    typical_single_room_share = 0.18
+    floor_clip = 140.0
+    ceiling_clip = 720.0
+    return min(max(ctx.total_sqft * typical_single_room_share, floor_clip), ceiling_clip)
+
+
+def _sqft_quantity_for_category(category: str, ctx: RenovationSqftContext) -> float:
+    if category in _WHOLE_HOME_SQFT_CATEGORIES:
+        return ctx.total_sqft
+    return ctx.effective_sqft
+
+
+def estimate_renovation_cost(
+    data: RenovationEstimateInput,
+    *,
+    sqft_context: RenovationSqftContext | None = None,
+) -> RenovationEstimate:
     renovation_class = _classify_renovation_class(data.condition_score, data.issues)
     severity_factor = _calculate_severity_multiplier(data.issues)
     quality_factor = _calculate_quality_factor(data.desired_quality_level)
@@ -35,6 +143,8 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
 
 
 
+    ctx = sqft_context or build_renovation_sqft_context(data.sqft, data.room_type)
+
     user_scope_categories = _build_user_scope_categories(
         data.user_inputs,
         data.renovation_elements,
@@ -43,6 +153,7 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
         data,
         combined_factor,
         user_scope_categories=user_scope_categories,
+        sqft_context=ctx,
     )
     subtotal_low = sum(item.cost_low for item in line_items)
     subtotal_high = sum(item.cost_high for item in line_items)
@@ -79,7 +190,7 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
     )
 
     timeline_low, timeline_high = _estimate_timeline_weeks(
-        sqft=data.sqft,
+        room_sqft=_sqft_for_room_timeline(ctx),
         issue_count=len(data.issues),
         renovation_class=renovation_class,
         days_on_market=data.days_on_market,
@@ -128,6 +239,12 @@ def estimate_renovation_cost(data: RenovationEstimateInput) -> RenovationEstimat
         "Planning estimate only — not a contractor bid or guaranteed scope.",
         "Figures blend visible issues, home size, quality level, and location factors (with overhead and contingency).",
     ]
+    if ctx.primary_room is not None and ctx.ratio_mid is not None:
+        assumptions.append(
+            f"Localized trades use ~{ctx.effective_sqft:,.0f} sqft for '{ctx.primary_room}' "
+            f"({ctx.ratio_mid:.1%} midpoint of typical living-area share from metadata + single-photo room signal); "
+            f"roof, envelope, and whole-home systems still use full {ctx.total_sqft:,.0f} sqft where applicable."
+        )
     if _is_wood_structure_context(data):
         assumptions.append(
             "Wood-frame structure signal detected; estimate includes wood-structure repair multiplier for relevant structural scope."
@@ -720,8 +837,10 @@ def _build_cost_line_items(
     factor: float,
     *,
     user_scope_categories: List[str] | None = None,
+    sqft_context: RenovationSqftContext | None = None,
 ) -> List[RenovationLineItem]:
-    sqft = max(data.sqft, 1.0)
+    ctx = sqft_context or build_renovation_sqft_context(data.sqft, data.room_type)
+    sqft = ctx.total_sqft
     kitchen_qty = max(1.0, data.beds / 3)
     bath_qty = max(1.0, data.baths)
 
@@ -756,17 +875,24 @@ def _build_cost_line_items(
             }
         )
 
+    q_paint = _sqft_quantity_for_category("paint", ctx)
+    q_floor = _sqft_quantity_for_category("flooring", ctx)
+    q_plumb = _sqft_quantity_for_category("plumbing", ctx)
+    q_elec = _sqft_quantity_for_category("electrical", ctx)
+    q_roof = _sqft_quantity_for_category("roof", ctx)
+    q_ext = _sqft_quantity_for_category("exterior", ctx)
+
     quantity_map = {
-        "paint": sqft,
-        "flooring": sqft * 0.8,
+        "paint": q_paint,
+        "flooring": q_floor * 0.8,
         "kitchen": kitchen_qty,
         "bathroom": bath_qty,
-        "plumbing": sqft,
-        "electrical": sqft,
-        "roof": sqft,
-        "exterior": sqft * 0.5,
-        "window": max(4, sqft / 250),
-        "doors": max(3, sqft / 400),
+        "plumbing": q_plumb,
+        "electrical": q_elec,
+        "roof": q_roof,
+        "exterior": q_ext * 0.5,
+        "window": max(4, ctx.total_sqft / 250),
+        "doors": max(3, ctx.total_sqft / 400),
     }
 
     line_items: List[RenovationLineItem] = []
@@ -814,15 +940,16 @@ def _build_cost_line_items(
 
     if not line_items:
         cost_type, low, high = COST_MAP["paint"]
+        q_fallback = _sqft_quantity_for_category("paint", ctx)
         line_items.append(
             RenovationLineItem(
                 category="Paint",
-                quantity=round(sqft, 2),
+                quantity=round(q_fallback, 2),
                 unit="sqft",
                 unit_cost_low=round(low * factor, 2),
                 unit_cost_high=round(high * factor, 2),
-                cost_low=round(sqft * low * factor, 2),
-                cost_high=round(sqft * high * factor, 2),
+                cost_low=round(q_fallback * low * factor, 2),
+                cost_high=round(q_fallback * high * factor, 2),
             )
         )
 
@@ -1002,24 +1129,30 @@ def _calculate_contingency_rate(issues: List[str], condition_score: int, *, low:
 
 def _estimate_timeline_weeks(
     *,
-    sqft: float,
+    room_sqft: float,
     issue_count: int,
     renovation_class: str,
     days_on_market: int,
     age_score_points: int = 0,
 ) -> tuple[int, int]:
+    """
+    Renovation duration from **room-scoped** sqft (typical single-photo / localized scope).
+
+    Thresholds are calibrated for one-room area (often hundreds of sqft), not full-property living area.
+    """
     # Fast-path for good-condition homes with cosmetic-only scope.
-    # When there are no detected issues, timeline should reflect light refresh work.
     if issue_count == 0 and renovation_class == "Cosmetic":
-        if sqft <= 3000:
+        if room_sqft <= 450:
             return 2, 3
         return 3, 4
 
-    base = 3
-    if sqft > 1400:
-        base += 2
-    if sqft > 2200:
-        base += 2
+    base = 2
+    if room_sqft > 220:
+        base += 1
+    if room_sqft > 380:
+        base += 1
+    if room_sqft > 520:
+        base += 1
     if issue_count >= 5:
         base += 2
     if renovation_class in {"Heavy", "Full Gut"}:

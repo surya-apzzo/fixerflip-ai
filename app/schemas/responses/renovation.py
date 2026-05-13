@@ -10,4 +10,5 @@ class RenovationEstimateResponse(BaseModel):
     suggested_work_items: List[str] = Field(default_factory=list)
     confidence_score: str
     explanation_summary: str
+    room_type: str = "unknown"
     renovated_image_url: str | None = None

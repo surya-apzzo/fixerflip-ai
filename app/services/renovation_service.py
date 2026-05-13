@@ -11,6 +11,7 @@ from app.engine.renovation_engine.image_edit_engine import (
 from app.engine.renovation_engine.renovation_cost_engine import (
     RenovationEstimateInput,
     apply_user_input_cost_adjustments,
+    build_renovation_sqft_context,
     estimate_renovation_cost,
     infer_user_scope_categories,
 )
@@ -371,7 +372,8 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         image_condition=image_condition,
         resolved_target_style=resolved_target_style,
     )
-    estimate = estimate_renovation_cost(estimate_input)
+    sqft_ctx = build_renovation_sqft_context(estimate_input.sqft, estimate_input.room_type)
+    estimate = estimate_renovation_cost(estimate_input, sqft_context=sqft_ctx)
     location_factor = _resolve_cost_adjustment_factor(payload)
     logger.debug("Renovation base estimate computed in %.1fms", (time.perf_counter() - t4) * 1000)
 
@@ -397,7 +399,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     estimate = apply_user_input_cost_adjustments(
         estimate,
         payload.user_inputs,
-        payload.sqft,
+        sqft_ctx.effective_sqft,
         location_factor=location_factor,
         renovation_elements=payload.renovation_elements,
     )
@@ -417,6 +419,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
 
     response = build_renovation_estimate_response(
         estimate,
+        room_type=estimate_input.room_type,
         renovated_image_url=renovated_image_url,
     )
     logger.info(

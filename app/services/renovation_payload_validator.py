@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from typing import Any, TypedDict
 
@@ -12,6 +13,16 @@ from app.schemas.requests.renovation import RenovationEstimateRequest
 _ALLOWED_QUALITY_LEVELS = {"cosmetic", "standard", "premium", "luxury"}
 _VALIDATION_ERROR_CODE = "VALIDATION_ERROR"
 _REQUIRED_CONDITION_SOURCE_MESSAGE = "Provide either image_url or condition_score fallback."
+_SINGLE_IMAGE_URL_MESSAGE = (
+    "Renovation estimate accepts exactly one image_url per request. Send one photo per API call."
+)
+
+
+def _contains_multiple_http_urls(value: str) -> bool:
+    s = (value or "").strip()
+    if not s:
+        return False
+    return len(re.findall(r"https?://", s, flags=re.IGNORECASE)) > 1
 _ALLOWED_RENOVATION_ELEMENTS = {
     "flooring",
     "paint",
@@ -436,6 +447,8 @@ def _validate_payload_values(
             field="image_url",
             message=_REQUIRED_CONDITION_SOURCE_MESSAGE,
         )
+    if payload.image_url and _contains_multiple_http_urls(payload.image_url):
+        _append_error(errors, field="image_url", message=_SINGLE_IMAGE_URL_MESSAGE)
     if invalid_renovation_elements:
         allowed = ", ".join(sorted(_ALLOWED_RENOVATION_ELEMENTS))
         invalid = ", ".join(invalid_renovation_elements)

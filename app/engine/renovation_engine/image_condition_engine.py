@@ -160,6 +160,7 @@ ROOM_WEIGHTS = {
     "living_room": 0.20,
     "living": 0.20,
     "hall": 0.20,
+    "dining_room": 0.14,
     "bedroom": 0.10,
     "exterior": 0.15,
     "basement": 0.10,
@@ -167,10 +168,14 @@ ROOM_WEIGHTS = {
     "unknown": 0.10,
 }
 
-# Room Aliases
+# Room Aliases — canonical keys align with rules_config.ROOM_AREA_RATIO_RANGES + API room_type.
 ROOM_ALIASES = {
-    "hall": "living_room",
-    "hallway": "living_room",
+    "hall": "hall",
+    "hallway": "hall",
+    "corridor": "hall",
+    "foyer": "hall",
+    "entry": "hall",
+    "entryway": "hall",
     "living room": "living_room",
     "lounge": "living_room",
     "outside": "exterior",
@@ -180,6 +185,9 @@ ROOM_ALIASES = {
     "bathroom": "bathroom",
     "bath": "bathroom",
     "living": "living_room",
+    "dining room": "dining_room",
+    "dining": "dining_room",
+    "dining_room": "dining_room",
     "basement": "basement",
 }
 

@@ -92,3 +92,14 @@ CANONICAL_ISSUE_TYPES = frozenset(ISSUE_WEIGHTS.keys())
 DEFAULT_ADMIN_LABOR_INDEX: float = 1.10
 DEFAULT_ADMIN_MATERIAL_INDEX: float = 1.05
 
+# Typical share of gross living area by room (min, max). Midpoint drives localized estimate $/timeline
+# when vision/metadata identifies a primary room (single photo — not geometric measurement).
+ROOM_AREA_RATIO_RANGES: dict[str, tuple[float, float]] = {
+    "kitchen": (0.10, 0.18),
+    "living_room": (0.15, 0.30),
+    "bedroom": (0.10, 0.20),
+    "bathroom": (0.04, 0.08),
+    "dining_room": (0.08, 0.15),
+    "basement": (0.12, 0.25),
+    "hall": (0.05, 0.12),
+}

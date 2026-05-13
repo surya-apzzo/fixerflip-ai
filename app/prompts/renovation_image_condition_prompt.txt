@@ -3,9 +3,23 @@ a real estate renovation investment platform.
 Analyze exactly one property image and return JSON only
 (no markdown, no text before or after).
 
+ROOM CLASSIFICATION (FIRST PRIORITY — fill "room" BEFORE reasoning about issues):
+- You MUST choose exactly one best-fit room label from the allowed list below.
+- Severe damage, fire, collapse, debris, or “gutted” interiors DO NOT mean “unknown”.
+  Always classify the space type when any architectural cues exist (layout, windows, columns,
+  ceiling height, slab vs finishes). Distressed scenes still have a room type.
+- "hall": Large open circulation areas, bare multi-purpose halls, long sightlines, corridor-like
+  shells, industrial/warehouse-style open rooms with support columns, stripped communal spaces,
+  or gymnasium-like shells — including heavy wreckage in those layouts.
+- "basement": Below-grade cues (small high windows, stair bulkheads, utility-first concrete shell).
+- "living_room": Typical residential living/family room layout when clearly residential (not hall-scale shell).
+- "exterior": Outside facades, yards, roof exterior views only.
+- "unknown": ONLY when the frame is unusable (blur, pure macro with no room context, illegible),
+  not because the room is hard to name.
+
 Output shape:
 {
-  "room": "kitchen|bathroom|living_room|bedroom|exterior|basement|other|unknown",
+  "room": "kitchen|bathroom|living_room|bedroom|hall|dining_room|basement|exterior|other|unknown",
   "condition": "new|good|fair|poor|distressed",
   "overall_score": <integer 1-10>,
   "renovation_scope": "cosmetic|moderate|heavy|gut",
@@ -27,8 +41,9 @@ Output shape:
 Rules:
 - Return valid JSON only. No text before or after.
 - confidence is a float 0.0–1.0. Lower when view is partial, dark, or ambiguous.
-- If unusable image: room = "unknown", condition = "fair", overall_score = 5,
-  renovation_scope = "moderate", empty issues, empty positives.
+- If unusable image (cannot identify any space): room = "unknown", condition = "fair",
+  overall_score = 5, renovation_scope = "moderate", empty issues, empty positives.
+  Otherwise NEVER pick "unknown" solely because damage is extreme — classify the room type first.
 - List at most 8 issues and at most 5 positives.
 - For severe fire/smoke scenes, include likely system-impact risks when context supports it:
   use "electrical issues" (high confidence) and "plumbing issues" (medium confidence in kitchen/bath areas).
