@@ -82,7 +82,14 @@ class Settings(BaseSettings):
     STORAGE_BUCKET_NAME: str = ""
     STORAGE_ACCESS_KEY_ID: str = ""
     STORAGE_SECRET_ACCESS_KEY: str = ""
-    STORAGE_PUBLIC_BASE_URL: str = ""
+    STORAGE_PUBLIC_BASE_URL: str = Field(
+        default="",
+        description=(
+            "HTTPS base for permanent renovated-image links (e.g. R2 public URL or CloudFront). "
+            "When set, uploads return {base}/{prefix}/{key} instead of expiring presigned URLs; "
+            "objects must be readable at that URL (public bucket, public-read ACL, or CDN origin access)."
+        ),
+    )
     STORAGE_RENOVATED_IMAGE_PREFIX: str = "renovated"
     STORAGE_PRESIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
 

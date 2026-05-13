@@ -415,6 +415,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     response = build_renovation_estimate_response(
         estimate,
         room_type=estimate_input.room_type,
+        condition_score=int(image_condition.condition_score),
         renovated_image_url=renovated_image_url,
     )
     logger.info(

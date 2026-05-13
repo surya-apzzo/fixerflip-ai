@@ -28,6 +28,8 @@ The service returns:
 - `suggested_work_items`
 - `confidence_score`
 - `explanation_summary`
+- `room_type`
+- `condition_score` (0–100: from vision when `image_url` is sent, otherwise the request’s `condition_score`)
 - `renovated_image_url`
 
 There is also a lighter endpoint, `POST /api/v1/renovation/image-condition`, for image-only condition scoring.
@@ -45,8 +47,8 @@ There is also a lighter endpoint, `POST /api/v1/renovation/image-condition`, for
    - timeline estimate
    - work item suggestions
    - confidence score
-4. The public response mapper trims the rich internal estimate into the production API contract.
-5. If storage is configured, the edited image is uploaded to an S3-compatible bucket. This is currently a side effect only; the public estimate response does not return the uploaded URL.
+4. The public response mapper trims the rich internal estimate into the production API contract (including the condition score used for the estimate).
+5. If storage is configured, the edited image is uploaded to an S3-compatible bucket and the public response returns it as `renovated_image_url` when available.
 
 If no `image_url` is supplied, the service requires a manual `condition_score` and skips vision analysis.
 
@@ -301,6 +303,8 @@ Typical response:
   ],
   "confidence_score": "82%",
   "explanation_summary": "Property is classified as Moderate rehab based on kitchen condition and detected issues.",
+  "room_type": "kitchen",
+  "condition_score": 72,
   "renovated_image_url": "https://example.com/renovated.png"
 }
 ```

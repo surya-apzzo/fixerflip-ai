@@ -55,6 +55,10 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
         # Keep compatibility for providers that still require ACL.
         client.put_object(**put_kwargs, ACL="public-read")
 
+    # Stable, non-expiring links: use a public (or CDN) base URL. Presigned URLs always expire.
+    if (settings.STORAGE_PUBLIC_BASE_URL or "").strip():
+        return _build_public_url(key)
+
     try:
         return client.generate_presigned_url(
             "get_object",
@@ -63,12 +67,10 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
         )
     except Exception as exc:
         logger.warning("Failed to generate presigned URL for key '%s': %s", key, exc)
-        # Only return direct URL when explicitly configured as public.
-        if settings.STORAGE_PUBLIC_BASE_URL:
-            return _build_public_url(key)
         raise ValueError(
             "Uploaded image but failed to generate presigned download URL. "
-            "Set STORAGE_PUBLIC_BASE_URL for public objects or fix signing config."
+            "Set STORAGE_PUBLIC_BASE_URL to your bucket/CDN public base for permanent links, "
+            "or fix signing/credentials."
         ) from exc
 
 

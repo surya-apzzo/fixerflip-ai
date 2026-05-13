@@ -7,6 +7,7 @@ def build_renovation_estimate_response(
     estimate,
     *,
     room_type: str = "unknown",
+    condition_score: int,
     renovated_image_url: str | None = None,
 ) -> RenovationEstimateResponse:
     """Build the renovation estimate response from the estimate."""
@@ -19,5 +20,6 @@ def build_renovation_estimate_response(
         confidence_score=f"{estimate.confidence_score}%",
         explanation_summary=estimate.explanation_summary,
         room_type=rt,
+        condition_score=condition_score,
         renovated_image_url=renovated_image_url,
     )

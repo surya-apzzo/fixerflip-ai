@@ -11,4 +11,9 @@ class RenovationEstimateResponse(BaseModel):
     confidence_score: str
     explanation_summary: str
     room_type: str = "unknown"
+    condition_score: int = Field(
+        ge=0,
+        le=100,
+        description="Condition score used for this estimate (0–100; vision-derived when image_url is sent, else request value).",
+    )
     renovated_image_url: str | None = None
