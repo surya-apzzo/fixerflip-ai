@@ -9,6 +9,7 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.engine.image_condition.services.image_filter import FilteredImage
+from app.engine.renovation_engine.image_edit_engine import image_url_as_openai_vision_payload
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +70,8 @@ async def score_from_images(selected_images: list[FilteredImage]) -> dict[str, A
     for chunk in _chunk_images(selected_images):
         content: list[dict[str, Any]] = [{"type": "input_text", "text": vision_prompt}]
         for img in chunk:
-            content.append({"type": "input_image", "image_url": img.image_url})
+            payload_url = await image_url_as_openai_vision_payload(img.image_url)
+            content.append({"type": "input_image", "image_url": payload_url})
 
         response = await client.responses.create(
             model=settings.default_openai_vision_model,

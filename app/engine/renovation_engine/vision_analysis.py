@@ -16,6 +16,7 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from app.core.config import settings
+from app.engine.renovation_engine.image_edit_engine import image_url_as_openai_vision_payload
 from app.engine.renovation_engine.image_condition_engine import (
     CANONICAL_ISSUE_TYPES,
     CANONICAL_POSITIVE_TYPES,
@@ -41,7 +42,7 @@ _SEVERITY_RANK = {"severe": 0, "moderate": 1, "minor": 2}
 _VISION_FALLBACK_SCORE = 65
 _VISION_MAX_RETRIES = 2
 _VISION_RETRY_BACKOFF_SECONDS = 0.75
-_OPENAI_VISION_TIMEOUT_SECONDS = 20.0
+_OPENAI_VISION_TIMEOUT_SECONDS = 90.0
 
 _VISION_DISABLED_REASON = "vision_unavailable"
 _VISION_INVALID_OUTPUT_REASON = "invalid_model_output"
@@ -79,6 +80,7 @@ async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | Non
         model_candidates.append(fallback_model)
     try:
         prompt = _load_condition_prompt()
+        image_for_model = await image_url_as_openai_vision_payload(image_url)
         client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
             timeout=_OPENAI_VISION_TIMEOUT_SECONDS,
@@ -95,7 +97,7 @@ async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | Non
                                 "role": "user",
                                 "content": [
                                     {"type": "input_text", "text": prompt},
-                                    {"type": "input_image", "image_url": image_url},
+                                    {"type": "input_image", "image_url": image_for_model},
                                 ],
                             }
                         ],
