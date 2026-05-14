@@ -71,7 +71,13 @@ class Settings(BaseSettings):
     )
     OPENAI_MODEL: str = ""
     OPENAI_VISION_ENABLED: bool = False
-    RENOVATION_IMAGE_STRICT_GUARDRAIL: bool = False
+    RENOVATION_IMAGE_STRICT_GUARDRAIL: bool = Field(
+        default=False,
+        description=(
+            "When true, run repair-only guardrail on edited previews (heavy damage, no style ask): "
+            "may re-edit and prefer a toned-down preview. Default false: return first successful upload."
+        ),
+    )
 
     # Optional: Redis cache for image edits.
     REDIS_URL: str = ""

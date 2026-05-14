@@ -1,5 +1,6 @@
 from fastapi import APIRouter
 
+from app.api.v1.endpoints.bucket_file import router as bucket_file_router
 from app.api.v1.endpoints.condition_score import router as condition_score_router
 from app.api.v1.endpoints.health import router as health_router
 from app.api.v1.endpoints.route import router as renovation_router
@@ -7,6 +8,7 @@ from app.api.v1.endpoints.route import router as renovation_router
 api_router = APIRouter()
 api_router.include_router(health_router, tags=["health"])
 api_router.include_router(renovation_router, tags=["renovation"])
+api_router.include_router(bucket_file_router, tags=["bucket"])
 api_router.include_router(condition_score_router, tags=["condition-score"])
 
 __all__ = ["api_router"]

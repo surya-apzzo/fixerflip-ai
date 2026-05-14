@@ -12,6 +12,22 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _make_s3_client():
+    import boto3
+
+    addressing = (settings.STORAGE_S3_ADDRESSING_STYLE or "virtual").strip().lower()
+    if addressing not in ("path", "virtual"):
+        addressing = "virtual"
+    return boto3.client(
+        "s3",
+        endpoint_url=settings.STORAGE_ENDPOINT_URL,
+        region_name=settings.STORAGE_REGION or "auto",
+        aws_access_key_id=settings.STORAGE_ACCESS_KEY_ID,
+        aws_secret_access_key=settings.STORAGE_SECRET_ACCESS_KEY,
+        config=Config(signature_version="s3v4", s3={"addressing_style": addressing}),
+    )
+
+
 def _require_storage_config() -> None:
     required = {
         "STORAGE_ENDPOINT_URL": settings.STORAGE_ENDPOINT_URL,
@@ -31,29 +47,15 @@ def _build_public_url(key: str) -> str:
 
 
 def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) -> str:
-    import boto3
-
-    addressing = (settings.STORAGE_S3_ADDRESSING_STYLE or "virtual").strip().lower()
-    if addressing not in ("path", "virtual"):
-        addressing = "virtual"
-
     logger.debug(
-        "Uploading renovated image endpoint=%s bucket=%s key=%s bytes=%s addressing=%s",
+        "Uploading renovated image endpoint=%s bucket=%s key=%s bytes=%s",
         settings.STORAGE_ENDPOINT_URL,
         settings.STORAGE_BUCKET_NAME,
         key,
         len(image_bytes),
-        addressing,
     )
 
-    client = boto3.client(
-        "s3",
-        endpoint_url=settings.STORAGE_ENDPOINT_URL,
-        region_name=settings.STORAGE_REGION or "auto",
-        aws_access_key_id=settings.STORAGE_ACCESS_KEY_ID,
-        aws_secret_access_key=settings.STORAGE_SECRET_ACCESS_KEY,
-        config=Config(signature_version="s3v4", s3={"addressing_style": addressing}),
-    )
+    client = _make_s3_client()
 
     put_kwargs = {
         "Bucket": settings.STORAGE_BUCKET_NAME,
@@ -89,8 +91,6 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
 
     public_base = (settings.STORAGE_PUBLIC_BASE_URL or "").strip()
 
-    # Presigned URLs work for private buckets (Chrome can load the image). Unsigned CDN/base URLs
-    # only work when the object is anonymously readable; do not skip presign just because PUBLIC_BASE is set.
     try:
         signed = client.generate_presigned_url(
             "get_object",
@@ -118,6 +118,35 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
             "Fix STORAGE_* / signing and credentials. Optional: set STORAGE_PUBLIC_BASE_URL and "
             "STORAGE_RENOVATED_RESPONSE_USE_PUBLIC_URL=true only if unsigned URLs work in the browser."
         ) from exc
+
+
+def presigned_get_url_for_renovated_object_key(key: str) -> str:
+    """Mint a fresh presigned GET URL for a key under STORAGE_RENOVATED_IMAGE_PREFIX (GET /bucket/file)."""
+    _require_storage_config()
+    raw = (key or "").strip()
+    if not raw or ".." in raw or raw.startswith("/"):
+        raise ValueError("Invalid object key.")
+    prefix = settings.STORAGE_RENOVATED_IMAGE_PREFIX.strip("/")
+    if not (raw == prefix or raw.startswith(prefix + "/")):
+        raise ValueError("Key is not allowed for renovated-image downloads.")
+
+    client = _make_s3_client()
+    try:
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.STORAGE_BUCKET_NAME, "Key": raw},
+            ExpiresIn=settings.STORAGE_PRESIGNED_URL_TTL_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Presigned GET by key failed (bucket=%s key=%s): %s: %s",
+            settings.STORAGE_BUCKET_NAME,
+            raw,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        raise ValueError("Could not generate download URL for this key.") from exc
 
 
 async def upload_base64_image_to_bucket(*, image_base64: str, media_type: str) -> str:

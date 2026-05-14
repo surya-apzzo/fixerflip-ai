@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import time
 
+from app.core.config import settings
 from app.engine.renovation_engine.image_condition_engine import ImageConditionResult
 from app.engine.renovation_engine.image_edit_engine import (
     build_instruction_for_edit,
@@ -52,6 +53,16 @@ def _has_style_upgrade_request(payload: RenovationEstimateRequest) -> bool:
         "theme",
         "luxury",
         "premium",
+        "renovate",
+        "remodel",
+        "rehab",
+        "modernize",
+        "modernise",
+        "upgrade",
+        "refresh",
+        "gut",
+        "redo",
+        "overhaul",
     )
     return any(marker in text for marker in style_markers)
 
@@ -130,6 +141,9 @@ async def _enforce_repair_only_guardrail(
     has_detected_issues: bool,
     pipeline_warnings: list[str],
 ) -> str | None:
+    if not settings.RENOVATION_IMAGE_STRICT_GUARDRAIL:
+        return candidate_url
+
     if not candidate_url or not has_detected_issues or _has_style_upgrade_request(payload):
         return candidate_url
 
@@ -168,15 +182,15 @@ async def _enforce_repair_only_guardrail(
     except Exception as retry_exc:
         logger.warning("Strict repair-only retry failed: %s", retry_exc)
         pipeline_warnings.append(
-            "Edited output appeared over-restored for repair-only mode; source image retained."
+            "Strict repair-only retry failed; first preview image kept for display."
         )
-        return payload.image_url
+        return candidate_url
 
     if retry_condition.condition_score >= 90 and not retry_condition.issues:
         pipeline_warnings.append(
-            "Edited output remained over-restored after strict retry; source image retained."
+            "Strict repair-only retry still looked fully restored; first preview image kept for display."
         )
-        return payload.image_url
+        return candidate_url
 
     pipeline_warnings.append("Applied strict repair-only retry to avoid over-restoration.")
     return retry_url

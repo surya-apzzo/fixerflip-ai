@@ -16,12 +16,12 @@ from typing import Any
 from openai import AsyncOpenAI
 
 from app.core.config import settings
-from app.engine.renovation_engine.image_edit_engine import image_url_as_openai_vision_payload
 from app.engine.renovation_engine.image_condition_engine import (
     CANONICAL_ISSUE_TYPES,
     CANONICAL_POSITIVE_TYPES,
     ImageConditionEngine,
 )
+from app.engine.renovation_engine.image_edit_engine import image_url_as_openai_vision_payload
 from app.schemas import (
     ImageConditionResult,
     IssueDetection,
