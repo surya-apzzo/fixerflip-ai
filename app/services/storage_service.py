@@ -88,15 +88,16 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
     )
 
     public_base = (settings.STORAGE_PUBLIC_BASE_URL or "").strip()
-    if public_base:
-        return _build_public_url(key)
 
+    # Presigned URLs work for private buckets (Chrome can load the image). Unsigned CDN/base URLs
+    # only work when the object is anonymously readable; do not skip presign just because PUBLIC_BASE is set.
     try:
         signed = client.generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.STORAGE_BUCKET_NAME, "Key": key},
             ExpiresIn=settings.STORAGE_PRESIGNED_URL_TTL_SECONDS,
         )
+        return signed
     except Exception as exc:
         logger.warning(
             "Presigned GET URL failed (bucket=%s key=%s): %s: %s",
@@ -106,9 +107,16 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
             exc,
             exc_info=True,
         )
+        if public_base and settings.STORAGE_RENOVATED_RESPONSE_USE_PUBLIC_URL:
+            logger.warning(
+                "Returning unsigned public URL (STORAGE_RENOVATED_RESPONSE_USE_PUBLIC_URL=true); "
+                "bucket must allow anonymous GET at STORAGE_PUBLIC_BASE_URL."
+            )
+            return _build_public_url(key)
         raise ValueError(
-            "Uploaded image but failed to generate presigned download URL. "
-            "Set STORAGE_PUBLIC_BASE_URL for stable public links, or fix signing/credentials."
+            "Uploaded image but failed to generate a presigned download URL. "
+            "Fix STORAGE_* / signing and credentials. Optional: set STORAGE_PUBLIC_BASE_URL and "
+            "STORAGE_RENOVATED_RESPONSE_USE_PUBLIC_URL=true only if unsigned URLs work in the browser."
         ) from exc
 
 
