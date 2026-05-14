@@ -227,6 +227,11 @@ async def _generate_renovated_image_url(
         media_type=edit_result.media_type,
         pipeline_warnings=pipeline_warnings,
     )
+    if uploaded_url is None:
+        logger.error(
+            "Renovation image edit succeeded but storage upload returned no URL. "
+            "Configure STORAGE_* (or AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY / AWS_REGION) on this environment."
+        )
     return await _enforce_repair_only_guardrail(
         payload=payload,
         image_condition=image_condition,
