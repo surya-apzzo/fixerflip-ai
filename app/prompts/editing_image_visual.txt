@@ -4,7 +4,6 @@ The appended "Constraints" block selects the edit mode (full renovation preview 
 
 For every mode, keep these invariants:
 - Preserve the ENTIRE photograph edge-to-edge: left, center, and right must all stay visible and detailed. Do not crop, zoom, shift framing, or "center" the room differently. Do not let the far left or far right side of the frame go empty, washed out, or simplified away.
-- Preserve every doorway, arch, mirror reflection, and opening into adjacent halls or rooms exactly as in the source—do not wall them off, shrink them, or replace them with blank paint.
 - Preserve camera angle, perspective, and room geometry. Keep the same window placement, wall divisions, ceiling line, and floor footprint.
 - Preserve every intact object and finish that is not part of the damage: furniture, plants, built-ins, cabinetry, wall paneling, trim, lamps, decor, and anything visible on side walls—especially the far right and far left of the image. Do not remove, replace, or hide them to make the room look "cleaner."
 - Damage repair only where needed: fix debris, holes, cracks, stains, fallen frames, and broken trim in place.

@@ -41,6 +41,7 @@ class RenovationEstimateInput(BaseModel):
     time_factor: float = Field(default=1.0, ge=0.5, le=2.5)
     location_factor: float = Field(default=1.0, ge=0.5, le=2.5)
     desired_quality_level: Literal["cosmetic", "standard", "premium", "luxury"] = "standard"
+    target_renovation_style: str = "investor_standard"
     address: str = ""
     city: str = ""
     property_type: str = "SFR"
