@@ -3,9 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import math
 import re
-from io import BytesIO
 from pathlib import Path
 from urllib.parse import quote, urlparse
 
@@ -46,42 +44,6 @@ _BROWSER_USER_AGENT = (
 _OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS = 60.0
 _OPENAI_IMAGE_EDIT_MAX_RETRIES = 1
 _OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS = 0.8
-
-_GPT_IMAGE_EDIT_SIZES = {
-    "1024x1024": 1.0,
-    "1536x1024": 1536 / 1024,
-    "1024x1536": 1024 / 1536,
-}
-
-
-def _select_gpt_image_edit_size(image_bytes: bytes) -> str:
-    """
-    Pick a fixed GPT-Image canvas whose aspect ratio best matches the source file.
-
-    Using only ``auto`` can change framing; matching aspect reduces perceived crop
-    and missing left/right content in wide living-room shots.
-    """
-    try:
-        from PIL import Image
-    except ImportError:
-        return "auto"
-    try:
-        with Image.open(BytesIO(image_bytes)) as im:
-            w, h = im.convert("RGB").size
-    except Exception:
-        return "auto"
-    if w < 32 or h < 32:
-        return "auto"
-    ratio = max(w / h, 0.01)
-    return min(_GPT_IMAGE_EDIT_SIZES, key=lambda k: abs(math.log(ratio) - math.log(_GPT_IMAGE_EDIT_SIZES[k])))
-
-
-def _image_edit_supports_input_fidelity(model: str) -> bool:
-    """input_fidelity is supported on gpt-image-1 / 1.5 family, not on -mini."""
-    m = (model or "").strip().lower()
-    if "mini" in m:
-        return False
-    return "gpt-image" in m or "image-1" in m
 
 
 def _is_retryable_openai_exception(exc: Exception) -> bool:
@@ -304,7 +266,7 @@ def build_instruction_for_edit(
     type_of_renovation: str,
     visual_type: str,
     desired_quality_level: str,
-    visual_scope_hint: str,
+    resolved_target_style: str,
     reference_image_url: str = "",
     renovation_elements: list[str] | None = None,
     detected_issues: list[str] | None = None,
@@ -314,10 +276,6 @@ def build_instruction_for_edit(
     element_descriptions = [_ELEMENT_HINTS.get(e, e) for e in elements]
 
     directive_lines = [
-        "Full-scene preservation: the output must include the SAME field of view as the source—every pixel "
-        "region from the left edge through the right edge. Do not crop, zoom, reframe, or shift the camera. "
-        "Keep all doorways, hallway openings, mirrors, windows, ceiling fans, wall art, mobile cabinets/carts, "
-        "built-ins, trim, and furniture that appear in the source unless the user explicitly asked to remove them.",
         "Primary directive: execute the explicit user instruction exactly and conservatively.",
         "Hard constraint: change only the specifically requested parts of the image.",
         "Hard constraint: do not add, remove, restage, redesign, or alter any non-requested objects/surfaces.",
@@ -325,7 +283,7 @@ def build_instruction_for_edit(
         f"Renovation type: {type_of_renovation}",
         f"Visual type: {visual_type}",
         f"Desired quality level: {desired_quality_level}",
-        f"Visual scope preset: {visual_scope_hint}",
+        f"Target renovation style: {resolved_target_style}",
     ]
 
     issues = [i.strip() for i in (detected_issues or []) if i and i.strip()]
@@ -427,17 +385,12 @@ async def edit_property_image_from_url(
     last_exc: Exception | None = None
     for attempt in range(_OPENAI_IMAGE_EDIT_MAX_RETRIES + 1):
         try:
-            model = settings.default_openai_image_edit_model
-            edit_kwargs: dict = {
-                "model": model,
-                "image": ("property_image.png", image_bytes, media_type),
-                "prompt": prompt,
-                "size": _select_gpt_image_edit_size(image_bytes),
-                "quality": "high",
-            }
-            if _image_edit_supports_input_fidelity(model):
-                edit_kwargs["input_fidelity"] = "high"
-            response = await client.images.edit(**edit_kwargs)
+            response = await client.images.edit(
+                model=settings.default_openai_image_edit_model,
+                image=("property_image.png", image_bytes, media_type),
+                prompt=prompt,
+                size="auto",
+            )
 
             data = getattr(response, "data", None) or []
             if not data or not getattr(data[0], "b64_json", None):

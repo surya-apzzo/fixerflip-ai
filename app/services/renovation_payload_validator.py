@@ -487,6 +487,10 @@ def validate_and_normalize_renovation_payload(
             "property_type": _normalize_optional_string(payload.property_type, fallback="SFR"),
             "listing_description": _normalize_optional_string(payload.listing_description),
             "listing_status": _normalize_optional_string(payload.listing_status),
+            "target_renovation_style": _normalize_optional_string(
+                payload.target_renovation_style,
+                fallback="investor_standard",
+            ),
             "type_of_renovation": _normalize_optional_string(
                 payload.type_of_renovation,
                 fallback="interior",

@@ -1,8 +1,7 @@
 MODE: Full renovation / damage repair (default when the user asks to renovate/fix/repair generally).
 Goal: The SAME room and SAME composition as the source—only with damage remediated. This is not a re-stage: do not replace the scene with a simpler or more generic interior.
 CRITICAL — preserve the full frame:
-- Keep everything that already looks correct along the LEFT edge, RIGHT edge, and corners: plants, cabinets, wood paneling, shelving, trim, doors, mirrors, hallway openings, ceiling fans, carts on wheels, and any decor. Do not erase, omit, shrink, or blur side interiors to “clean up” the image.
-- Do not wall off, narrow, or remove doorways or adjacent-room openings visible in the source.
+- Keep everything that already looks correct along the LEFT edge, RIGHT edge, and corners: plants, cabinets, wood paneling, shelving, trim, doors, and any decor. Do not erase, omit, shrink, or blur side interiors to “clean up” the image.
 - Match intact surfaces and objects to the source photo as closely as possible; only change pixels needed to fix obvious damage (debris, holes, cracks, stains, broken baseboards, fallen frames).
 Repairs:
 - Clear debris/shards from the floor and restore flooring texture and color consistent with the visible undamaged parts of the same floor (do not change room width or wall positions).
