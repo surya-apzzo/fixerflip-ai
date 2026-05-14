@@ -1,6 +1,7 @@
 MODE: Targeted edit only.
 Apply ONLY what the user explicitly requested (e.g. one wall color, one material swap, one fixture).
 - Keep the entire frame intact: do not crop, zoom, or remove content on the far left or far right.
+- Keep every doorway, mirror, hallway opening, ceiling fan, wall sconce, cart/cabinet on wheels, and wall art that appears in the source unless the user asked to remove that exact item.
 - Minimize changes outside the requested surfaces or objects.
 - Do not perform a full-room restoration or remove unrelated damage/debris unless the user asked for a broad renovation or cleanup.
 - Keep the rest of the scene—including plants, built-ins, and side-wall details—as close to the source as possible while making the requested change look natural.
