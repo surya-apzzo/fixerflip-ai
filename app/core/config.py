@@ -1,12 +1,15 @@
 import json
+import os
 from typing import Any, List, Union
 
-from pydantic import AnyHttpUrl, Field, field_validator
+from pydantic import AnyHttpUrl, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", case_sensitive=True, extra="ignore")
+    # S3-compatible object storage (Railway buckets, MinIO, R2, AWS, etc.).
+    # Env keys are matched case-insensitively. Optional AWS_* / S3_* aliases fill STORAGE_* when empty.
+    model_config = SettingsConfigDict(env_file=".env", case_sensitive=False, extra="ignore")
 
     PROJECT_NAME: str = "FastAPI Production App"
     API_V1_STR: str = "/api/v1"
@@ -97,6 +100,66 @@ class Settings(BaseSettings):
     STORAGE_PUBLIC_BASE_URL: str = ""
     STORAGE_RENOVATED_IMAGE_PREFIX: str = "renovated"
     STORAGE_PRESIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
+    # Railway Object Storage (t3.storageapi.dev) requires virtual-hosted-style; MinIO often uses path.
+    STORAGE_S3_ADDRESSING_STYLE: str = Field(
+        default="virtual",
+        description="S3 addressing style: virtual (Railway bucket default) or path",
+    )
+
+    @model_validator(mode="before")
+    @classmethod
+    def merge_aws_into_storage_fields(cls, data: Any) -> Any:
+        """Optional: copy common AWS_* / S3_* env names into STORAGE_* when STORAGE_* is empty (hosting templates)."""
+        if not isinstance(data, dict):
+            return data
+        upper_env = {
+            k.upper(): (v.strip() if isinstance(v, str) else str(v or "").strip())
+            for k, v in os.environ.items()
+            if v is not None and str(v).strip() != ""
+        }
+
+        def pick(*keys: str) -> str:
+            for k in keys:
+                if upper_env.get(k):
+                    return upper_env[k]
+            return ""
+
+        out = dict(data)
+
+        def get_str(key: str) -> str:
+            v = out.get(key)
+            if v is None:
+                return ""
+            return str(v).strip()
+
+        if not get_str("STORAGE_ACCESS_KEY_ID"):
+            v = pick("STORAGE_ACCESS_KEY_ID", "AWS_ACCESS_KEY_ID")
+            if v:
+                out["STORAGE_ACCESS_KEY_ID"] = v
+        if not get_str("STORAGE_SECRET_ACCESS_KEY"):
+            v = pick("STORAGE_SECRET_ACCESS_KEY", "AWS_SECRET_ACCESS_KEY")
+            if v:
+                out["STORAGE_SECRET_ACCESS_KEY"] = v
+        if not get_str("STORAGE_ENDPOINT_URL"):
+            v = pick("STORAGE_ENDPOINT_URL", "AWS_ENDPOINT_URL", "S3_ENDPOINT_URL", "S3_ENDPOINT")
+            if v:
+                out["STORAGE_ENDPOINT_URL"] = v
+        if not get_str("STORAGE_BUCKET_NAME"):
+            v = pick("STORAGE_BUCKET_NAME", "AWS_S3_BUCKET", "S3_BUCKET_NAME", "BUCKET_NAME")
+            if v:
+                out["STORAGE_BUCKET_NAME"] = v
+        region = get_str("STORAGE_REGION")
+        if not region or region.lower() == "auto":
+            v = pick("STORAGE_REGION", "AWS_REGION", "AWS_DEFAULT_REGION")
+            if v:
+                out["STORAGE_REGION"] = v
+
+        # Railway bucket UI: "Use virtual-hosted-style URLs" for *.storageapi.dev
+        ep = get_str("STORAGE_ENDPOINT_URL")
+        if ep and "storageapi.dev" in ep.lower():
+            if not get_str("STORAGE_S3_ADDRESSING_STYLE"):
+                out["STORAGE_S3_ADDRESSING_STYLE"] = "virtual"
+        return out
 
     @field_validator("BACKEND_CORS_ORIGINS", mode="before")
     @classmethod
@@ -169,6 +232,12 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_storage_strings(cls, v: str | None) -> str:
         return (v or "").strip()
+
+    @field_validator("STORAGE_S3_ADDRESSING_STYLE", mode="before")
+    @classmethod
+    def normalize_addressing_style(cls, v: str | None) -> str:
+        s = (v or "virtual").strip().lower()
+        return s if s in ("path", "virtual") else "virtual"
 
     @property
     def is_production(self) -> bool:

@@ -32,7 +32,19 @@ def _build_public_url(key: str) -> str:
 
 def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) -> str:
     import boto3
-    logger.debug("Uploading renovated image to storage endpoint=%s bucket=%s key=%s", settings.STORAGE_ENDPOINT_URL, settings.STORAGE_BUCKET_NAME, key)
+
+    addressing = (settings.STORAGE_S3_ADDRESSING_STYLE or "virtual").strip().lower()
+    if addressing not in ("path", "virtual"):
+        addressing = "virtual"
+
+    logger.debug(
+        "Uploading renovated image endpoint=%s bucket=%s key=%s bytes=%s addressing=%s",
+        settings.STORAGE_ENDPOINT_URL,
+        settings.STORAGE_BUCKET_NAME,
+        key,
+        len(image_bytes),
+        addressing,
+    )
 
     client = boto3.client(
         "s3",
@@ -40,7 +52,7 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
         region_name=settings.STORAGE_REGION or "auto",
         aws_access_key_id=settings.STORAGE_ACCESS_KEY_ID,
         aws_secret_access_key=settings.STORAGE_SECRET_ACCESS_KEY,
-        config=Config(signature_version="s3v4", s3={"addressing_style": "path"}),
+        config=Config(signature_version="s3v4", s3={"addressing_style": addressing}),
     )
 
     put_kwargs = {
@@ -51,9 +63,31 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
     }
     try:
         client.put_object(**put_kwargs)
-    except Exception:
-        # Keep compatibility for providers that still require ACL.
-        client.put_object(**put_kwargs, ACL="public-read")
+    except Exception as first_exc:
+        logger.warning(
+            "put_object first attempt failed (bucket=%s key=%s); retrying with ACL=public-read: %s: %s",
+            settings.STORAGE_BUCKET_NAME,
+            key,
+            type(first_exc).__name__,
+            first_exc,
+            exc_info=True,
+        )
+        try:
+            client.put_object(**put_kwargs, ACL="public-read")
+        except Exception:
+            logger.exception(
+                "put_object failed after ACL retry (bucket=%s key=%s). Check STORAGE_* credentials and endpoint reachability from this host.",
+                settings.STORAGE_BUCKET_NAME,
+                key,
+            )
+            raise
+
+    logger.info(
+        "Renovated image stored successfully bucket=%s key=%s bytes=%s",
+        settings.STORAGE_BUCKET_NAME,
+        key,
+        len(image_bytes),
+    )
 
     try:
         return client.generate_presigned_url(
@@ -62,8 +96,16 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
             ExpiresIn=settings.STORAGE_PRESIGNED_URL_TTL_SECONDS,
         )
     except Exception as exc:
-        logger.warning("Failed to generate presigned URL for key '%s': %s", key, exc)
-        # Only return direct URL when explicitly configured as public.
+        # Unsigned fallback only works if objects are publicly readable at this URL.
+        logger.warning(
+            "Presigned GET URL failed (bucket=%s key=%s): %s: %s. "
+            "If STORAGE_PUBLIC_BASE_URL is set, returning unsigned URL; fix presigning for parity with local.",
+            settings.STORAGE_BUCKET_NAME,
+            key,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
         if settings.STORAGE_PUBLIC_BASE_URL:
             return _build_public_url(key)
         raise ValueError(
