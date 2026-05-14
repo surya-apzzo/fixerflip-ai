@@ -63,20 +63,18 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
     }
     try:
         client.put_object(**put_kwargs)
-    except Exception as first_exc:
+    except Exception:
         logger.warning(
-            "put_object first attempt failed (bucket=%s key=%s); retrying with ACL=public-read: %s: %s",
+            "put_object first attempt failed (bucket=%s key=%s); retrying with ACL=public-read",
             settings.STORAGE_BUCKET_NAME,
             key,
-            type(first_exc).__name__,
-            first_exc,
             exc_info=True,
         )
         try:
             client.put_object(**put_kwargs, ACL="public-read")
         except Exception:
             logger.exception(
-                "put_object failed after ACL retry (bucket=%s key=%s). Check STORAGE_* credentials and endpoint reachability from this host.",
+                "put_object failed after ACL retry (bucket=%s key=%s). Check STORAGE_* and network.",
                 settings.STORAGE_BUCKET_NAME,
                 key,
             )
@@ -89,33 +87,28 @@ def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) 
         len(image_bytes),
     )
 
-    # Stable, non-expiring links: use a public (or CDN) base URL. Presigned URLs always expire.
-    if (settings.STORAGE_PUBLIC_BASE_URL or "").strip():
+    public_base = (settings.STORAGE_PUBLIC_BASE_URL or "").strip()
+    if public_base:
         return _build_public_url(key)
 
     try:
-        return client.generate_presigned_url(
+        signed = client.generate_presigned_url(
             "get_object",
             Params={"Bucket": settings.STORAGE_BUCKET_NAME, "Key": key},
             ExpiresIn=settings.STORAGE_PRESIGNED_URL_TTL_SECONDS,
         )
     except Exception as exc:
-        # Unsigned fallback only works if objects are publicly readable at this URL.
         logger.warning(
-            "Presigned GET URL failed (bucket=%s key=%s): %s: %s. "
-            "If STORAGE_PUBLIC_BASE_URL is set, returning unsigned URL; fix presigning for parity with local.",
+            "Presigned GET URL failed (bucket=%s key=%s): %s: %s",
             settings.STORAGE_BUCKET_NAME,
             key,
             type(exc).__name__,
             exc,
             exc_info=True,
         )
-        if settings.STORAGE_PUBLIC_BASE_URL:
-            return _build_public_url(key)
         raise ValueError(
             "Uploaded image but failed to generate presigned download URL. "
-            "Set STORAGE_PUBLIC_BASE_URL to your bucket/CDN public base for permanent links, "
-            "or fix signing/credentials."
+            "Set STORAGE_PUBLIC_BASE_URL for stable public links, or fix signing/credentials."
         ) from exc
 
 

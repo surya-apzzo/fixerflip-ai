@@ -100,9 +100,16 @@ class Settings(BaseSettings):
     STORAGE_PUBLIC_BASE_URL: str = Field(
         default="",
         description=(
-            "HTTPS base for permanent renovated-image links (e.g. R2 public URL or CloudFront). "
-            "When set, uploads return {base}/{prefix}/{key} instead of expiring presigned URLs; "
-            "objects must be readable at that URL (public bucket, public-read ACL, or CDN origin access)."
+            "Optional HTTPS base for CDN/public renovated links. "
+            "Used when presigned URL generation fails and STORAGE_RENOVATED_RESPONSE_USE_PUBLIC_URL is true "
+            "(unsigned {base}/{key} fallback only if the bucket allows anonymous GET)."
+        ),
+    )
+    STORAGE_RENOVATED_RESPONSE_USE_PUBLIC_URL: bool = Field(
+        default=False,
+        description=(
+            "If true with STORAGE_PUBLIC_BASE_URL set, fallback to unsigned {base}/{key} when presign fails. "
+            "Happy path always uses presigned URLs so private buckets open in Chrome."
         ),
     )
     STORAGE_RENOVATED_IMAGE_PREFIX: str = "renovated"
