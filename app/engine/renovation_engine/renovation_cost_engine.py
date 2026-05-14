@@ -5,7 +5,6 @@ Estimates the cost of a renovation project based on the condition of the propert
 
 from __future__ import annotations
 
-import logging
 import re
 from dataclasses import dataclass
 from typing import List, Literal, Tuple
@@ -22,22 +21,16 @@ from app.schemas import (
     RenovationLineItem,
 )
 
-logger = logging.getLogger(__name__)
-
 
 @dataclass(frozen=True, slots=True)
 class RenovationSqftContext:
-    """Living-area totals vs room-heuristic effective sqft used for localized trades."""
+    """Listing ``total_sqft`` vs ``effective_sqft`` used to price visible repair scope (typically one room/photo)."""
 
     total_sqft: float
     effective_sqft: float
     primary_room: str | None
     ratio_mid: float | None
 
-
-_WHOLE_HOME_SQFT_CATEGORIES = frozenset(
-    {"roof", "exterior", "foundation", "hvac", "window", "doors", "garage", "landscaping"}
-)
 
 _ROOM_LABEL_TO_CANONICAL: dict[str, str] = {
     "kitchen": "kitchen",
@@ -80,18 +73,30 @@ def _parse_primary_room_for_ratio(room_type: str) -> str | None:
     return None
 
 
+def _heuristic_single_photo_room_sqft(total_sqft: float) -> float:
+    """Typical one-room footprint when the photo/label does not resolve a room ratio (not full listing)."""
+    total = max(float(total_sqft), 1.0)
+    typical_single_room_share = 0.18
+    floor_clip = 140.0
+    ceiling_clip = 720.0
+    return min(max(total * typical_single_room_share, floor_clip), ceiling_clip)
+
+
 def build_renovation_sqft_context(total_sqft: float, room_type: str) -> RenovationSqftContext:
     """
-    Derive effective renovation sqft from total living area and detected/named primary room.
+    Derive ``effective_sqft`` for cost math: the **room in frame** (or a conservative one-room proxy),
+    not the full listing living area.
 
-    Whole-property signals (roof, envelope, etc.) still use ``total_sqft`` inside line-item logic.
+    ``total_sqft`` is retained for listing/market context elsewhere (e.g. gap score), not for sqft-priced
+    line-item quantities in this engine.
     """
     total = max(float(total_sqft), 1.0)
     primary = _parse_primary_room_for_ratio(room_type)
     if primary is None:
+        effective = _heuristic_single_photo_room_sqft(total)
         return RenovationSqftContext(
             total_sqft=total,
-            effective_sqft=total,
+            effective_sqft=effective,
             primary_room=None,
             ratio_mid=None,
         )
@@ -116,16 +121,12 @@ def _sqft_for_room_timeline(ctx: RenovationSqftContext) -> float:
     """
     if ctx.primary_room is not None:
         return ctx.effective_sqft
-    typical_single_room_share = 0.18
-    floor_clip = 140.0
-    ceiling_clip = 720.0
-    return min(max(ctx.total_sqft * typical_single_room_share, floor_clip), ceiling_clip)
+    return _heuristic_single_photo_room_sqft(ctx.total_sqft)
 
 
-def _sqft_quantity_for_category(category: str, ctx: RenovationSqftContext) -> float:
-    if category in _WHOLE_HOME_SQFT_CATEGORIES:
-        return ctx.total_sqft
-    return ctx.effective_sqft
+def _sqft_quantity_for_category(_category: str, ctx: RenovationSqftContext) -> float:
+    """All sqft-priced trades use the localized room footprint (``effective_sqft``), never full listing sqft."""
+    return max(ctx.effective_sqft, 1.0)
 
 
 def estimate_renovation_cost(
@@ -177,6 +178,7 @@ def estimate_renovation_cost(
     if total_low > total_high:
         total_low, total_high = total_high, total_low
 
+    total_low, total_high = _tighten_public_cost_spread(total_low, total_high, renovation_class)
 
     gap_signal = compute_gap_score(
         listing_price=data.listing_price,
@@ -241,9 +243,15 @@ def estimate_renovation_cost(
     ]
     if ctx.primary_room is not None and ctx.ratio_mid is not None:
         assumptions.append(
-            f"Localized trades use ~{ctx.effective_sqft:,.0f} sqft for '{ctx.primary_room}' "
-            f"({ctx.ratio_mid:.1%} midpoint of typical living-area share from metadata + single-photo room signal); "
-            f"roof, envelope, and whole-home systems still use full {ctx.total_sqft:,.0f} sqft where applicable."
+            f"Sqft-priced repair work is scaled to this photo's room footprint (~{ctx.effective_sqft:,.0f} sqft for "
+            f"'{ctx.primary_room}', {ctx.ratio_mid:.1%} typical share of {ctx.total_sqft:,.0f} sqft living area). "
+            "It is not scaled to the full house unless you add explicit whole-home scope."
+        )
+    elif ctx.primary_room is None:
+        assumptions.append(
+            f"No specific room ratio was resolved; sqft-priced trades use a single-room footprint "
+            f"~{ctx.effective_sqft:,.0f} sqft (heuristic from {ctx.total_sqft:,.0f} sqft listing living area), "
+            "not the full property."
         )
     if _is_wood_structure_context(data):
         assumptions.append(
@@ -840,7 +848,6 @@ def _build_cost_line_items(
     sqft_context: RenovationSqftContext | None = None,
 ) -> List[RenovationLineItem]:
     ctx = sqft_context or build_renovation_sqft_context(data.sqft, data.room_type)
-    sqft = ctx.total_sqft
     kitchen_qty = max(1.0, data.beds / 3)
     bath_qty = max(1.0, data.baths)
 
@@ -891,8 +898,8 @@ def _build_cost_line_items(
         "electrical": q_elec,
         "roof": q_roof,
         "exterior": q_ext * 0.5,
-        "window": max(4, ctx.total_sqft / 250),
-        "doors": max(3, ctx.total_sqft / 400),
+        "window": max(1.0, ctx.effective_sqft / 250),
+        "doors": max(1.0, ctx.effective_sqft / 400),
     }
 
     line_items: List[RenovationLineItem] = []
@@ -1153,17 +1160,22 @@ def _estimate_timeline_weeks(
         base += 1
     if room_sqft > 520:
         base += 1
-    if issue_count >= 5:
+    if issue_count >= 8:
         base += 2
-    if renovation_class in {"Heavy", "Full Gut"}:
-        base += 2
+    elif issue_count >= 5:
+        base += 1
+    if renovation_class == "Full Gut":
+        base += 3
+    elif renovation_class == "Heavy":
+        base += 1
     if days_on_market > 45:
         base += 1
     if age_score_points >= 22:
-        base += 2
+        base += 1 if renovation_class in {"Heavy", "Moderate", "Cosmetic"} else 2
     elif age_score_points >= 12:
         base += 1
-    return base, base + 4
+    span = 4 if renovation_class in {"Cosmetic", "Moderate", "Heavy"} else 5
+    return base, base + span
 
 
 #confidence score is a measure of the confidence in the renovation estimate
@@ -1195,10 +1207,36 @@ def _calculate_confidence_score(
     return "LOW", score
 
 
+def _implies_full_gut_rebuild(issues: List[str], condition_score: int) -> bool:
+    """
+    Reserve Full Gut for strip-to-shell / structural rebuild class jobs.
+
+    Heavy interior rehab (water, failed ceiling finishes, debris, generic "structural damage"
+    from finishes) stays **Heavy** unless issue text clearly implies a full rebuild.
+
+    A low vision score alone is **not** enough: many distressed rooms score under 20 but are
+    still heavy-gut *interior* rehabs, not whole-house shell rebuilds.
+    """
+    blob = " ".join(_normalize_token_text(i) for i in issues)
+    if not blob.strip():
+        return False
+    if any(p in blob for p in ("foundation failure", "foundation settlement", "structural failure")):
+        return True
+    if _text_has_term(blob, "foundation") and (
+        _text_has_term(blob, "structural damage") or _text_has_term(blob, "foundation cracks")
+    ):
+        return True
+    if any(p in blob for p in ("house uninhabitable", "complete demolition interior", "gut to studs entire")):
+        return True
+    if _text_has_term(blob, "fire damage") and condition_score < 30:
+        return True
+    return False
+
+
 def _classify_renovation_class(condition_score: int, issues: List[str]) -> Literal["Cosmetic", "Moderate", "Heavy", "Full Gut"]:
     major = _major_risk_issue(issues)
     issue_count = len(issues)
-    if major and condition_score < 40:
+    if _implies_full_gut_rebuild(issues, condition_score):
         return "Full Gut"
     if major or condition_score < 55 or issue_count >= 7:
         return "Heavy"
@@ -1207,9 +1245,46 @@ def _classify_renovation_class(condition_score: int, issues: List[str]) -> Liter
     return "Cosmetic"
 
 
+def _tighten_public_cost_spread(
+    low: int, high: int, renovation_class: Literal["Cosmetic", "Moderate", "Heavy", "Full Gut"]
+) -> tuple[int, int]:
+    """Cap unrealistically wide min/max bands for investor-facing rehab estimates."""
+    if low <= 0 or high <= low:
+        return low, high
+    ratio = high / low
+    caps = {
+        "Cosmetic": 2.15,
+        "Moderate": 2.40,
+        "Heavy": 2.45,
+        "Full Gut": 3.15,
+    }
+    cap = caps.get(renovation_class, 2.45)
+    if ratio <= cap:
+        return low, high
+    new_high = int(round(low * cap))
+    new_high = max(new_high, int(round(low * 1.18)))
+    new_high = max(new_high, low + 2500)
+    return low, new_high
+
+
 def _build_suggested_work_items(issues: List[str], room_type: str) -> List[str]:
     normalized = {(i or "").strip().lower() for i in issues}
     items: list[str] = []
+    _add_work_item_when_matched(
+        normalized,
+        items,
+        (
+            "debris",
+            "rubble",
+            "stripped",
+            "ceiling collapse",
+            "collapsed ceiling",
+            "demolition",
+            "lath",
+            "failed ceiling",
+        ),
+        "demolition & debris removal",
+    )
     _add_work_item_when_matched(
         normalized,
         items,
@@ -1231,8 +1306,36 @@ def _build_suggested_work_items(issues: List[str], room_type: str) -> List[str]:
     _add_work_item_when_matched(
         normalized,
         items,
-        ("electrical", "rewire", "wiring"),
-        "electrical safety upgrades",
+        (
+            "damaged ceiling",
+            "ceiling damage",
+            "ceiling water",
+            "ceiling stains",
+            "popcorn ceiling",
+            "sagging ceiling",
+        ),
+        "ceiling repair",
+    )
+    _add_work_item_when_matched(
+        normalized,
+        items,
+        ("drywall", "plaster", "wall damage", "missing drywall", "stripped walls"),
+        "drywall repair/replacement",
+    )
+    _add_work_item_when_matched(
+        normalized,
+        items,
+        (
+            "electrical",
+            "rewire",
+            "wiring",
+            "water damage",
+            "mold",
+            "ceiling collapse",
+            "collapsed ceiling",
+            "exposed wiring",
+        ),
+        "electrical inspection & safety upgrades",
     )
     _add_work_item_when_matched(
         normalized,
@@ -1240,8 +1343,13 @@ def _build_suggested_work_items(issues: List[str], room_type: str) -> List[str]:
         ("roof damage", "roof", "sagging roof"),
         "roof repairs",
     )
-    _add_work_item_when_matched(normalized, items, ("paint wear", "stains", "paint", "damaged ceiling"), "paint")
-    _add_work_item_when_matched(normalized, items, ("floor damage", "outdated flooring", "carpet", "floor"), "flooring")
+    _add_work_item_when_matched(normalized, items, ("paint wear", "stains", "paint"), "paint")
+    _add_work_item_when_matched(
+        normalized,
+        items,
+        ("floor damage", "outdated flooring", "carpet", "floor", "subfloor"),
+        "flooring replacement",
+    )
     _add_work_item_when_matched(normalized, items, ("outdated cabinets", "damaged appliances", "cabinet", "kitchen"), "kitchen update")
     _add_work_item_when_matched(
         normalized,
@@ -1258,7 +1366,7 @@ def _build_suggested_work_items(issues: List[str], room_type: str) -> List[str]:
 
     if not items:
         items.extend(_build_room_fallback_work_items(room_type))
-    return items[:8]
+    return items[:10]
 
 
 def _add_work_item_when_matched(
@@ -1394,10 +1502,14 @@ def _canonical_work_item_key(item: str) -> str:
         " repairs",
         " repair",
         " refresh",
+        " replacement",
     ):
         if key.endswith(suffix):
             key = key[: -len(suffix)].strip()
             break
+    # Collapse all flooring-related labels (user intent + issue-derived) to one bucket.
+    if key.startswith("flooring"):
+        return "flooring"
     return key
 
 
@@ -1410,7 +1522,7 @@ def _deduplicate_work_items(items: List[str]) -> List[str]:
             continue
         seen.add(key)
         deduped.append(item)
-    return deduped[:8]
+    return deduped[:10]
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:

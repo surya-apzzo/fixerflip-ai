@@ -56,9 +56,8 @@ def _has_style_upgrade_request(payload: RenovationEstimateRequest) -> bool:
     return any(marker in text for marker in style_markers)
 
 
-def _resolve_target_style(payload: RenovationEstimateRequest) -> str:
-    if payload.target_renovation_style and payload.target_renovation_style != "investor_standard":
-        return payload.target_renovation_style
+def _resolve_visual_scope_hint(payload: RenovationEstimateRequest) -> str:
+    """Derived edit-scope tag (reference vs elements). Quality/finish is only desired_quality_level."""
     if payload.visual_type == "upload_my_own_reference_photo" and payload.reference_image_url:
         return "reference_style"
     if payload.visual_type == "choose_an_existing_style":
@@ -67,7 +66,7 @@ def _resolve_target_style(payload: RenovationEstimateRequest) -> str:
         if len(payload.renovation_elements) == 1:
             return payload.renovation_elements[0].replace(" ", "_").lower()
         return "targeted_elements"
-    return payload.target_renovation_style
+    return "investor_standard"
 
 
 def _build_fallback_image_condition() -> ImageConditionResult:
@@ -126,7 +125,7 @@ async def _enforce_repair_only_guardrail(
     *,
     payload: RenovationEstimateRequest,
     image_condition: ImageConditionResult,
-    resolved_target_style: str,
+    visual_scope_hint: str,
     candidate_url: str | None,
     has_detected_issues: bool,
     pipeline_warnings: list[str],
@@ -151,7 +150,7 @@ async def _enforce_repair_only_guardrail(
         type_of_renovation=payload.type_of_renovation,
         visual_type=payload.visual_type,
         desired_quality_level=payload.desired_quality_level,
-        resolved_target_style=resolved_target_style,
+        visual_scope_hint=visual_scope_hint,
         reference_image_url=payload.reference_image_url,
         renovation_elements=[],
         detected_issues=getattr(image_condition, "issues", []),
@@ -187,7 +186,7 @@ async def _generate_renovated_image_url(
     *,
     payload: RenovationEstimateRequest,
     image_condition: ImageConditionResult,
-    resolved_target_style: str,
+    visual_scope_hint: str,
     user_scope_categories: list[str],
     pipeline_warnings: list[str],
 ) -> str | None:
@@ -206,7 +205,7 @@ async def _generate_renovated_image_url(
         type_of_renovation=payload.type_of_renovation,
         visual_type=effective_visual_type,
         desired_quality_level=payload.desired_quality_level,
-        resolved_target_style=resolved_target_style,
+        visual_scope_hint=visual_scope_hint,
         reference_image_url=payload.reference_image_url,
         renovation_elements=effective_elements,
         detected_issues=getattr(image_condition, "issues", []),
@@ -231,7 +230,7 @@ async def _generate_renovated_image_url(
     return await _enforce_repair_only_guardrail(
         payload=payload,
         image_condition=image_condition,
-        resolved_target_style=resolved_target_style,
+        visual_scope_hint=visual_scope_hint,
         candidate_url=uploaded_url,
         has_detected_issues=has_detected_issues,
         pipeline_warnings=pipeline_warnings,
@@ -242,7 +241,6 @@ def _build_renovation_estimate_input(
     payload: RenovationEstimateRequest,
     *,
     image_condition: ImageConditionResult,
-    resolved_target_style: str,
 ) -> RenovationEstimateInput:
     return RenovationEstimateInput(
         sqft=payload.sqft,
@@ -264,7 +262,6 @@ def _build_renovation_estimate_input(
         condition_score=image_condition.condition_score,
         issues=image_condition.issues,
         room_type=image_condition.room_type,
-        target_renovation_style=resolved_target_style,
         desired_quality_level=payload.desired_quality_level,
         labor_index=payload.labor_index,
         material_index=payload.material_index,
@@ -329,7 +326,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     )
 
     if payload.image_url:
-        resolved_target_style = _resolve_target_style(payload)
+        visual_scope_hint = _resolve_visual_scope_hint(payload)
         t2 = time.perf_counter()
         image_condition = await _resolve_image_condition(payload, pipeline_warnings)
         logger.debug(
@@ -344,7 +341,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         renovated_image_url = await _generate_renovated_image_url(
             payload=payload,
             image_condition=image_condition,
-            resolved_target_style=resolved_target_style,
+            visual_scope_hint=visual_scope_hint,
             user_scope_categories=user_scope_categories,
             pipeline_warnings=pipeline_warnings,
         )
@@ -364,13 +361,11 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
             analysis_status="manual_input",
             fallback_reason="manual_condition_score",
         )
-        resolved_target_style = _resolve_target_style(payload)
 
     t4 = time.perf_counter()
     estimate_input = _build_renovation_estimate_input(
         payload,
         image_condition=image_condition,
-        resolved_target_style=resolved_target_style,
     )
     sqft_ctx = build_renovation_sqft_context(estimate_input.sqft, estimate_input.room_type)
     estimate = estimate_renovation_cost(estimate_input, sqft_context=sqft_ctx)

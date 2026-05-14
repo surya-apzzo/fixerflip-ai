@@ -23,8 +23,7 @@ class RenovationEstimateRequest(BaseModel):
     years_since_last_sale: int | None = None
     permit_years_since_last: int | None = None
     zip_code: str = ""
-    target_renovation_style: str = "investor_standard"
-    desired_quality_level: str = ["standard", "cosmetic", "premium", "luxury"]
+    desired_quality_level: str = "standard"
     labor_index: float = DEFAULT_ADMIN_LABOR_INDEX
     material_index: float = DEFAULT_ADMIN_MATERIAL_INDEX
     time_factor: float = 1.0
