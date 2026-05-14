@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     OPENAI_API_KEY: str = ""
     OPENAI_VISION_MODEL: str = "gpt-4o-mini"
     OPENAI_IMAGE_EDIT_MODEL: str = "gpt-image-1"
+    OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS: float = Field(
+        default=120.0,
+        ge=30.0,
+        le=600.0,
+        description="Per-attempt HTTP timeout for OpenAI images.edit (image generation can exceed 60s).",
+    )
+    OPENAI_IMAGE_EDIT_MAX_RETRIES: int = Field(
+        default=1,
+        ge=0,
+        le=5,
+        description="Extra retries after the first images.edit attempt for rate limits, timeouts, and 5xx.",
+    )
     OPENAI_MODEL: str = ""
     OPENAI_VISION_ENABLED: bool = False
     RENOVATION_IMAGE_STRICT_GUARDRAIL: bool = False

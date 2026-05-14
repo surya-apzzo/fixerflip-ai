@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import logging
 import math
 import re
@@ -43,8 +44,6 @@ _BROWSER_USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
-_OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS = 60.0
-_OPENAI_IMAGE_EDIT_MAX_RETRIES = 1
 _OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS = 0.8
 
 _GPT_IMAGE_EDIT_SIZES = {
@@ -418,14 +417,17 @@ async def edit_property_image_from_url(
     )
     prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
 
+    timeout_sec = float(settings.OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS)
+    max_retries = int(settings.OPENAI_IMAGE_EDIT_MAX_RETRIES)
+
     client = AsyncOpenAI(
         api_key=settings.OPENAI_API_KEY,
-        timeout=_OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS,
+        timeout=timeout_sec,
         max_retries=0,
     )
 
     last_exc: Exception | None = None
-    for attempt in range(_OPENAI_IMAGE_EDIT_MAX_RETRIES + 1):
+    for attempt in range(max_retries + 1):
         try:
             model = settings.default_openai_image_edit_model
             edit_kwargs: dict = {
@@ -452,9 +454,18 @@ async def edit_property_image_from_url(
         except Exception as exc:
             last_exc = exc
             is_retryable = _is_retryable_openai_exception(exc)
-            if attempt < _OPENAI_IMAGE_EDIT_MAX_RETRIES and is_retryable:
+            if attempt < max_retries and is_retryable:
                 await _wait_for_retry_backoff(attempt)
                 continue
+            logger.warning(
+                "OpenAI images.edit failed after %s attempt(s) (timeout=%ss, model=%s): %s: %s",
+                attempt + 1,
+                timeout_sec,
+                settings.default_openai_image_edit_model,
+                type(exc).__name__,
+                exc,
+                exc_info=True,
+            )
             raise ValueError(
                 "Image edit request failed. Retry later. "
                 "If this repeats, inspect server logs for the upstream OpenAI error."
@@ -521,3 +532,25 @@ async def _download_source_image(image_url: str) -> tuple[bytes, str]:
         cache_dir=IMAGE_CACHE_DIR,
     )
     return response.content, media_type
+
+
+async def image_url_as_openai_vision_payload(image_url: str) -> str:
+    """
+    Prefer a data URL for OpenAI vision so their servers do not fetch the URL.
+
+    Presigned object-storage URLs often time out from OpenAI (400 invalid_request_error).
+    """
+    url = (image_url or "").strip()
+    if not url:
+        return ""
+    try:
+        image_bytes, media_type = await _download_source_image(url)
+        b64 = base64.b64encode(image_bytes).decode("ascii")
+        return f"data:{media_type};base64,{b64}"
+    except Exception as exc:
+        logger.warning(
+            "OpenAI vision: server-side download failed (%s): %s",
+            url[:120] + ("…" if len(url) > 120 else ""),
+            exc,
+        )
+        return url
