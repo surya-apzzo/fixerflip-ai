@@ -3,6 +3,15 @@
 from app.core import image_download as mod
 
 
+def test_cotality_host_uses_cotality_referer_even_with_crmls_override(monkeypatch) -> None:
+    monkeypatch.setattr(mod.settings, "CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER", "https://www.crmls.org/")
+    headers = mod.build_image_download_headers(
+        "https://api.cotality.com/trestle/Media/Property/PHOTO-Jpeg/1156941869/2/x.jpg",
+        flow="condition_score",
+    )
+    assert headers["Referer"] == "https://www.cotality.com/"
+
+
 def test_crmls_path_on_realty_cdn_uses_crmls_referer(monkeypatch) -> None:
     monkeypatch.setattr(mod.settings, "RENOVATION_IMAGE_DOWNLOAD_REFERER", "")
     monkeypatch.setattr(mod.settings, "IMAGE_DOWNLOAD_REFERER", "")

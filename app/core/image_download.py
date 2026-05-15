@@ -60,6 +60,8 @@ def _referer_for_image_url(image_url: str) -> str | None:
     path = (parsed.path or "").lower().replace("\\", "/")
     if "crmls" in host or "/crmls/" in path or "mls_photos/crmls" in path:
         return _MLS_HOST_REFERERS["crmls.org"]
+    if "cotality.com" in host or "/trestle/" in path:
+        return _MLS_HOST_REFERERS["cotality.com"]
     return _referer_for_image_host(parsed.netloc)
 
 
@@ -102,17 +104,17 @@ def build_image_download_headers(image_url: str, *, flow: ImageDownloadFlow) -> 
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         "Accept-Language": "en-US,en;q=0.9",
     }
-    override = image_download_referer(flow)
     parsed = urlparse(image_url)
-    if override:
+    # Host/path wins over env override so CRMLS referer does not break api.cotality.com URLs.
+    mls_referer = _referer_for_image_url(image_url) if parsed.netloc else None
+    override = image_download_referer(flow)
+    if mls_referer:
+        headers["Referer"] = mls_referer
+        headers["Origin"] = mls_referer.rstrip("/")
+    elif override:
         headers["Referer"] = override
-    elif parsed.netloc:
-        mls_referer = _referer_for_image_url(image_url)
-        if mls_referer:
-            headers["Referer"] = mls_referer
-            headers["Origin"] = mls_referer.rstrip("/")
-        elif parsed.scheme:
-            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+    elif parsed.scheme and parsed.netloc:
+        headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
     return headers
 
 

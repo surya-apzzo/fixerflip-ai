@@ -36,10 +36,11 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                 detail={
                     "code": "IMAGE_DOWNLOAD_FAILED",
                     "message": (
-                        "Could not download any listing photo URLs (often HTTP 403 from MLS/CDN). "
-                        "Set CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER=https://www.crmls.org/ and "
-                        "CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE=https://images.weserv.nl/?url={url_no_scheme_encoded} "
-                        "on Railway (no quotes), redeploy, or re-host photos on public S3/CDN URLs."
+                        "Could not download any listing photo URLs (HTTP 403). Cotality/Trestle "
+                        "(api.cotality.com) often block server and proxy access from cloud hosts—re-host "
+                        "photos on your S3/CDN or pass browser-loaded base64. CRMLS/realty.dev URLs use "
+                        "auto referer; do not set CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER to crmls.org "
+                        "when your feed is Cotality."
                     ),
                     "meta": {
                         "total_input": total_input,
