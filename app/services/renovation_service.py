@@ -4,7 +4,7 @@ import logging
 import time
 
 from app.core.config import settings
-from app.engine.renovation_engine.image_condition_engine import ImageConditionResult
+from app.schemas import ImageConditionResult
 from app.engine.renovation_engine.image_edit_engine import (
     build_instruction_for_edit,
     edit_property_image_from_url,
@@ -19,7 +19,6 @@ from app.engine.renovation_engine.renovation_cost_engine import (
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
 from app.schemas.requests.renovation import RenovationEstimateRequest
 from app.schemas.responses.renovation import RenovationEstimateResponse
-from app.services.location_indices_service import resolve_location_indices
 from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
 from app.services.renovation_response_mapper import build_renovation_estimate_response
 from app.services.storage_service import upload_base64_image_to_bucket
@@ -27,6 +26,10 @@ from app.services.storage_service import upload_base64_image_to_bucket
 logger = logging.getLogger(__name__)
 
 _PUBLIC_IMAGE_EDIT_ERROR = "Image edit failed. Retry later or inspect server logs."
+
+
+def _cost_adjustment_factor(*, labor_index: float, material_index: float) -> float:
+    return max((labor_index * 0.6) + (material_index * 0.4), 0.5)
 
 
 def _has_style_upgrade_request(payload: RenovationEstimateRequest) -> bool:
@@ -167,7 +170,7 @@ async def _enforce_repair_only_guardrail(
         visual_scope_hint=visual_scope_hint,
         reference_image_url=payload.reference_image_url,
         renovation_elements=[],
-        detected_issues=getattr(image_condition, "issues", []),
+        detected_issues=image_condition.issues,
     )
     try:
         retry_edit_result = await edit_property_image_from_url(
@@ -206,7 +209,7 @@ async def _generate_renovated_image_url(
     pipeline_warnings: list[str],
 ) -> str | None:
     explicit_user_request = bool((payload.user_inputs or "").strip()) or bool(payload.renovation_elements)
-    has_detected_issues = bool(getattr(image_condition, "issues", []))
+    has_detected_issues = bool(image_condition.issues)
     if not (explicit_user_request or has_detected_issues):
         return payload.image_url
 
@@ -230,7 +233,7 @@ async def _generate_renovated_image_url(
         visual_scope_hint=visual_scope_hint,
         reference_image_url=payload.reference_image_url,
         renovation_elements=effective_elements,
-        detected_issues=getattr(image_condition, "issues", []),
+        detected_issues=image_condition.issues,
     )
     try:
         edit_result = await edit_property_image_from_url(
@@ -272,17 +275,10 @@ def _build_renovation_estimate_input(
 ) -> RenovationEstimateInput:
     return RenovationEstimateInput(
         sqft=payload.sqft,
-        beds=payload.beds,
-        baths=payload.baths,
-        address=payload.address,
-        city=payload.city,
         zip_code=payload.zip_code,
-        property_type=payload.property_type,
         year_built=payload.year_built,
-        lot_size=payload.lot_size,
         listing_price=payload.listing_price,
         listing_description=payload.listing_description,
-        listing_status=payload.listing_status,
         days_on_market=payload.days_on_market,
         avg_area_price_per_sqft=payload.avg_area_price_per_sqft,
         years_since_last_sale=payload.years_since_last_sale,
@@ -293,58 +289,24 @@ def _build_renovation_estimate_input(
         desired_quality_level=payload.desired_quality_level,
         labor_index=payload.labor_index,
         material_index=payload.material_index,
-        time_factor=payload.time_factor,
-        location_factor=payload.location_factor,
         renovation_elements=payload.renovation_elements,
         user_inputs=payload.user_inputs,
     )
 
 
-async def _apply_dynamic_location_indices(
-    payload: RenovationEstimateRequest,
-) -> RenovationEstimateRequest:
-    if not payload.zip_code:
-        return payload
-
-    factors = await resolve_location_indices(payload.zip_code)
-    updates: dict[str, float] = {}
-    if factors.labor_index is not None:
-        updates["labor_index"] = factors.labor_index
-    if factors.time_factor is not None:
-        updates["time_factor"] = factors.time_factor
-    if factors.location_factor is not None:
-        updates["location_factor"] = factors.location_factor
-
-    if not updates:
-        return payload
-    return payload.model_copy(update=updates)
-
-
-def _resolve_cost_adjustment_factor(payload: RenovationEstimateRequest) -> float:
-    if payload.time_factor != 1.0 or payload.location_factor != 1.0:
-        return max(payload.time_factor * payload.location_factor, 0.5)
-    return max((payload.labor_index * 0.6) + (payload.material_index * 0.4), 0.5)
-
-
 async def build_renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
     started = time.perf_counter()
     logger.info(
-        "Renovation estimate request start has_image=%s zip=%s sqft=%s beds=%s baths=%s elements=%s",
+        "Renovation estimate request start has_image=%s zip=%s sqft=%s elements=%s",
         bool((payload.image_url or "").strip()),
         (payload.zip_code or "").strip() or None,
         payload.sqft,
-        payload.beds,
-        payload.baths,
         len(payload.renovation_elements or []),
     )
 
     t0 = time.perf_counter()
     payload = validate_and_normalize_renovation_payload(payload)
     logger.debug("Renovation payload validated in %.1fms", (time.perf_counter() - t0) * 1000)
-
-    t1 = time.perf_counter()
-    payload = await _apply_dynamic_location_indices(payload)
-    logger.debug("Renovation location indices resolved in %.1fms", (time.perf_counter() - t1) * 1000)
 
     pipeline_warnings: list[str] = []
     renovated_image_url: str | None = None
@@ -360,9 +322,9 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         logger.debug(
             "Renovation vision resolved in %.1fms status=%s issues=%s room=%s",
             (time.perf_counter() - t2) * 1000,
-            getattr(image_condition, "analysis_status", "unknown"),
-            len(getattr(image_condition, "issues", []) or []),
-            getattr(image_condition, "room_type", "unknown"),
+            image_condition.analysis_status,
+            len(image_condition.issues or []),
+            image_condition.room_type,
         )
 
         t3 = time.perf_counter()
@@ -397,7 +359,10 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
     )
     sqft_ctx = build_renovation_sqft_context(estimate_input.sqft, estimate_input.room_type)
     estimate = estimate_renovation_cost(estimate_input, sqft_context=sqft_ctx)
-    location_factor = _resolve_cost_adjustment_factor(payload)
+    cost_multiplier = _cost_adjustment_factor(
+        labor_index=estimate_input.labor_index,
+        material_index=estimate_input.material_index,
+    )
     logger.debug("Renovation base estimate computed in %.1fms", (time.perf_counter() - t4) * 1000)
 
     if payload.renovation_elements:
@@ -423,12 +388,12 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         estimate,
         payload.user_inputs,
         sqft_ctx.effective_sqft,
-        location_factor=location_factor,
+        location_factor=cost_multiplier,
         renovation_elements=payload.renovation_elements,
     )
 
-    analysis_status = getattr(image_condition, "analysis_status", "ai_success")
-    fallback_reason = getattr(image_condition, "fallback_reason", None)
+    analysis_status = image_condition.analysis_status
+    fallback_reason = image_condition.fallback_reason
     if analysis_status != "ai_success":
         fallback_note = f"Condition source: {analysis_status}"
         if fallback_reason:

@@ -7,17 +7,10 @@ from app.core.rules_config import DEFAULT_ADMIN_LABOR_INDEX, DEFAULT_ADMIN_MATER
 
 class RenovationEstimateRequest(BaseModel):
     image_url: str = ""
-    address: str = ""
-    city: str = ""
     sqft: float
-    beds: int = 0
-    baths: float = 0.0
-    lot_size: float = 0.0
     year_built: int | None = None
-    property_type: str = "SFR"
     listing_price: float = 0.0
     listing_description: str = ""
-    listing_status: str = ""
     days_on_market: int = 0
     avg_area_price_per_sqft: float = 0.0
     years_since_last_sale: int | None = None
@@ -26,8 +19,6 @@ class RenovationEstimateRequest(BaseModel):
     desired_quality_level: str = "standard"
     labor_index: float = DEFAULT_ADMIN_LABOR_INDEX
     material_index: float = DEFAULT_ADMIN_MATERIAL_INDEX
-    time_factor: float = 1.0
-    location_factor: float = 1.0
     type_of_renovation: str = "interior"
     visual_type: str = "select_elements_to_renovate"
     reference_image_url: str = ""

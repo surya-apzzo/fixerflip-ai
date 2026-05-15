@@ -595,8 +595,6 @@ def infer_user_scope_categories(
 
 
 def _resolve_cost_factor(data: RenovationEstimateInput) -> float:
-    if data.time_factor != 1.0 or data.location_factor != 1.0:
-        return _clamp(data.time_factor * data.location_factor, 0.7, 2.5)
     return _clamp(((data.labor_index * 0.6) + (data.material_index * 0.4)), 0.7, 2.5)
 
 
@@ -865,8 +863,8 @@ def _build_cost_line_items(
     sqft_context: RenovationSqftContext | None = None,
 ) -> List[RenovationLineItem]:
     ctx = sqft_context or build_renovation_sqft_context(data.sqft, data.room_type)
-    kitchen_qty = max(1.0, data.beds / 3)
-    bath_qty = max(1.0, data.baths)
+    kitchen_qty = 1.0
+    bath_qty = 1.0
 
     selected_scope = _map_selected_elements_to_scope(data.renovation_elements)
     requested_scope = set(user_scope_categories or [])

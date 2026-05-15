@@ -1,4 +1,4 @@
-from typing import List
+from typing import List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,9 @@ class ImageConditionResult(BaseModel):
         default_factory=list,
         description="Structured issue detections including type, severity, and confidence.",
     )
+    analysis_status: Literal["ai_success", "fallback", "manual_input"] = "ai_success"
+    fallback_reason: str | None = None
+    model_used: str | None = None
 
 
 class IssueDetection(BaseModel):

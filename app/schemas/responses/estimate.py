@@ -30,25 +30,16 @@ class RenovationEstimate(BaseModel):
 
 class RenovationEstimateInput(BaseModel):
     sqft: float = Field(gt=0)
-    beds: int = Field(ge=0)
-    baths: float = Field(ge=0)
     zip_code: str = ""
     condition_score: int = Field(ge=0, le=100)
     issues: List[str] = Field(default_factory=list)
     room_type: str = "unknown"
     labor_index: float = Field(default=1.0, ge=0.7, le=2.5)
     material_index: float = Field(default=1.0, ge=0.7, le=2.5)
-    time_factor: float = Field(default=1.0, ge=0.5, le=2.5)
-    location_factor: float = Field(default=1.0, ge=0.5, le=2.5)
     desired_quality_level: Literal["cosmetic", "standard", "premium", "luxury"] = "standard"
-    address: str = ""
-    city: str = ""
-    property_type: str = "SFR"
     year_built: int | None = None
-    lot_size: float = Field(default=0.0, ge=0.0)
     listing_price: float = Field(default=0.0, ge=0.0)
     listing_description: str = ""
-    listing_status: str = ""
     days_on_market: int = Field(default=0, ge=0)
     avg_area_price_per_sqft: float = Field(default=0.0, ge=0.0)
     years_since_last_sale: int | None = Field(default=None, ge=0)

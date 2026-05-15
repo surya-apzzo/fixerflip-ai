@@ -448,16 +448,13 @@ def _apply_numeric_rule_override(
     )
 
 
-def _base_numeric_validation_rules(_payload: RenovationEstimateRequest) -> tuple[NumericValidationRule, ...]:
+def _base_numeric_validation_rules() -> tuple[NumericValidationRule, ...]:
     return (
         _build_numeric_rule(
             field="sqft",
             minimum=0.0,
             min_inclusive=False,
         ),
-        _build_numeric_rule(field="beds", minimum=0.0),
-        _build_numeric_rule(field="baths", minimum=0.0),
-        _build_numeric_rule(field="lot_size", minimum=0.0),
         _build_numeric_rule(field="listing_price", minimum=0.0),
         _build_numeric_rule(field="days_on_market", minimum=0.0),
         _build_numeric_rule(field="avg_area_price_per_sqft", minimum=0.0),
@@ -466,14 +463,12 @@ def _base_numeric_validation_rules(_payload: RenovationEstimateRequest) -> tuple
         _build_numeric_rule(field="condition_score", minimum=0.0, maximum=100.0),
         _build_numeric_rule(field="labor_index", minimum=0.7, maximum=2.5),
         _build_numeric_rule(field="material_index", minimum=0.7, maximum=2.5),
-        _build_numeric_rule(field="time_factor", minimum=0.5, maximum=2.5),
-        _build_numeric_rule(field="location_factor", minimum=0.5, maximum=2.5),
     )
 
 
-def _build_numeric_validation_rules(payload: RenovationEstimateRequest) -> tuple[NumericValidationRule, ...]:
+def _build_numeric_validation_rules() -> tuple[NumericValidationRule, ...]:
     dynamic_rules: list[NumericValidationRule] = []
-    for base_rule in _base_numeric_validation_rules(payload):
+    for base_rule in _base_numeric_validation_rules():
         override = _resolve_numeric_rule_override(base_rule.field)
         dynamic_rules.append(_apply_numeric_rule_override(base_rule, override))
     return tuple(dynamic_rules)
@@ -523,7 +518,7 @@ def _validate_payload_values(
 ) -> None:
     errors: list[ValidationErrorItem] = []
 
-    for rule in _build_numeric_validation_rules(payload):
+    for rule in _build_numeric_validation_rules():
         _validate_numeric_rule(errors=errors, payload=payload, rule=rule)
 
     if not payload.image_url and payload.condition_score is None:
@@ -571,12 +566,8 @@ def validate_and_normalize_renovation_payload(
     normalized = payload.model_copy(
         update={
             "image_url": _normalize_optional_string(payload.image_url),
-            "address": _normalize_optional_string(payload.address),
-            "city": _normalize_optional_string(payload.city),
             "zip_code": _normalize_optional_string(payload.zip_code),
-            "property_type": _normalize_optional_string(payload.property_type, fallback="SFR"),
             "listing_description": _normalize_optional_string(payload.listing_description),
-            "listing_status": _normalize_optional_string(payload.listing_status),
             "type_of_renovation": type_stored,
             "visual_type": _normalize_optional_string(
                 payload.visual_type,

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from app.engine.renovation_engine.renovation_cost_engine import (
     RenovationEstimateInput,
     _build_cost_line_items,
@@ -17,14 +15,11 @@ from app.services.renovation_payload_validator import (
     validate_and_normalize_renovation_payload,
 )
 from app.services.renovation_response_mapper import build_renovation_estimate_response
-from app.services.renovation_service import _resolve_preview_status
 
 
 def _base_request(**overrides) -> RenovationEstimateRequest:
     data = {
         "sqft": 1500.0,
-        "beds": 3,
-        "baths": 2.0,
         "condition_score": 70,
         "room_type": "living",
         "issues": [],
@@ -74,8 +69,6 @@ def test_deduplicate_work_items_prefers_renovation_suffix():
 def test_selected_elements_cost_scope_ignores_unrelated_issues():
     data = RenovationEstimateInput(
         sqft=1800,
-        beds=3,
-        baths=2,
         condition_score=45,
         issues=["outdated cabinets", "old bathroom", "roof damage"],
         room_type="kitchen",
@@ -90,7 +83,7 @@ def test_selected_elements_cost_scope_ignores_unrelated_issues():
     assert "roof" in categories or "foundation" in categories
 
 
-def test_response_mapper_surfaces_warnings_and_preview_status():
+def test_response_mapper_builds_estimate_response():
     estimate = RenovationEstimate(
         renovation_class="Cosmetic",
         minimum_cost=10_000,
@@ -109,34 +102,9 @@ def test_response_mapper_surfaces_warnings_and_preview_status():
         room_type="kitchen",
         condition_score=80,
         renovated_image_url="https://cdn.example.com/edited.png",
-        source_image_url="https://cdn.example.com/original.png",
-        preview_status="ready",
-        warnings=["Vision analysis is disabled."],
-        analysis_status="fallback",
     )
-    assert response.preview_status == "ready"
+    assert response.renovation_class == "Cosmetic"
+    assert response.estimated_renovation_range == "$10,000 - $20,000"
     assert response.renovated_image_url.endswith("edited.png")
-    assert response.source_image_url.endswith("original.png")
-    assert response.warnings == ["Vision analysis is disabled."]
-    assert response.analysis_status == "fallback"
-
-
-@pytest.mark.parametrize(
-    ("explicit", "issues", "renovated", "warnings", "expected"),
-    [
-        (False, False, None, [], "not_requested"),
-        (True, False, None, ["Image edit failed."], "failed"),
-        (True, False, None, ["Renovated image upload failed"], "upload_failed"),
-        (True, False, "https://cdn.example.com/new.png", [], "ready"),
-        (False, False, None, [], "skipped"),
-    ],
-)
-def test_resolve_preview_status(explicit, issues, renovated, warnings, expected):
-    status = _resolve_preview_status(
-        has_image=expected != "skipped",
-        explicit_user_request=explicit,
-        has_detected_issues=issues,
-        renovated_image_url=renovated,
-        pipeline_warnings=warnings,
-    )
-    assert status == expected
+    assert response.room_type == "kitchen"
+    assert response.condition_score == 80
