@@ -256,7 +256,11 @@ class Settings(BaseSettings):
     )
     @classmethod
     def strip_image_download_strings(cls, v: str | None) -> str:
-        return (v or "").strip()
+        s = (v or "").strip()
+        # Railway UI paste sometimes includes literal quote characters in the value.
+        if len(s) >= 2 and s[0] == s[-1] and s[0] in "\"'":
+            s = s[1:-1].strip()
+        return s
 
     @field_validator(
         "BLS_API_KEY",

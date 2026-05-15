@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from typing import Literal
+from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
@@ -17,6 +17,11 @@ ImageDownloadFlow = Literal["renovation", "condition_score"]
 _BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/131.0.0.0 Safari/537.36"
+)
+
+_BUILTIN_PROXY_TEMPLATES: tuple[str, ...] = (
+    "https://images.weserv.nl/?url={url_no_scheme_encoded}",
+    "https://wsrv.nl/?url={url_full_encoded}",
 )
 
 # Hosts that reject generic server clients unless Referer matches the portal.
@@ -49,12 +54,7 @@ def _referer_for_image_host(host: str) -> str | None:
 
 
 def _referer_for_image_url(image_url: str) -> str | None:
-    """
-  Pick Referer from URL host and path.
-
-  CRMLS listing photos are often served from third-party CDNs (e.g. imagecdn.realty.dev)
-  but still require a crmls.org Referer, not the CDN's site referer.
-    """
+    """CRMLS assets on third-party CDNs (e.g. imagecdn.realty.dev) need crmls.org Referer."""
     parsed = urlparse(image_url)
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower().replace("\\", "/")
@@ -83,6 +83,19 @@ def image_download_proxy_template(flow: ImageDownloadFlow) -> str:
     return (settings.IMAGE_DOWNLOAD_PROXY_TEMPLATE or "").strip()
 
 
+def image_download_config_summary(flow: ImageDownloadFlow) -> dict[str, Any]:
+    """Non-secret snapshot for logs / API error meta (verify Railway env is loaded)."""
+    referer = image_download_referer(flow)
+    proxy_template = image_download_proxy_template(flow)
+    return {
+        "flow": flow,
+        "referer_configured": bool(referer),
+        "proxy_configured": bool(proxy_template),
+        "referer_env": _FLOW_REFERER_ENV[flow],
+        "proxy_env": _FLOW_PROXY_ENV[flow],
+    }
+
+
 def build_image_download_headers(image_url: str, *, flow: ImageDownloadFlow) -> dict[str, str]:
     headers: dict[str, str] = {
         "User-Agent": _BROWSER_USER_AGENT,
@@ -103,8 +116,7 @@ def build_image_download_headers(image_url: str, *, flow: ImageDownloadFlow) -> 
     return headers
 
 
-def build_proxy_image_urls(image_url: str, *, flow: ImageDownloadFlow) -> list[str]:
-    template = image_download_proxy_template(flow)
+def _proxy_urls_from_template(template: str, image_url: str) -> list[str]:
     if not template:
         return []
     if "://" in image_url:
@@ -129,13 +141,55 @@ def build_proxy_image_urls(image_url: str, *, flow: ImageDownloadFlow) -> list[s
     return candidates
 
 
+def build_proxy_image_urls(image_url: str, *, flow: ImageDownloadFlow) -> list[str]:
+    templates: list[str] = []
+    configured = image_download_proxy_template(flow)
+    if configured:
+        templates.append(configured)
+    for builtin in _BUILTIN_PROXY_TEMPLATES:
+        if builtin not in templates:
+            templates.append(builtin)
+
+    candidates: list[str] = []
+    for template in templates:
+        for url in _proxy_urls_from_template(template, image_url):
+            if url not in candidates:
+                candidates.append(url)
+    return candidates
+
+
+def _try_proxy_download(
+    *,
+    image_url: str,
+    flow: ImageDownloadFlow,
+    proxy_urls: list[str],
+    timeout: float,
+    headers: dict[str, str],
+) -> bytes | None:
+    for proxy_url in proxy_urls:
+        try:
+            proxy_response = httpx.get(
+                proxy_url,
+                timeout=timeout,
+                follow_redirects=True,
+                headers=headers,
+            )
+            proxy_response.raise_for_status()
+            content = proxy_response.content
+            if content and len(content) > 256:
+                return content
+        except Exception as proxy_exc:
+            logger.debug("Proxy download failed for %s via %s: %s", image_url[:80], proxy_url[:80], proxy_exc)
+    return None
+
+
 def download_listing_image_bytes(
     image_url: str,
     *,
     flow: ImageDownloadFlow,
-    timeout: float = 12.0,
+    timeout: float = 20.0,
 ) -> bytes | None:
-    """Download one listing photo; try flow-specific proxy on HTTP 401/403."""
+    """Download one listing photo; try configured + built-in proxies on HTTP 401/403."""
     cleaned = (image_url or "").strip()
     if not cleaned:
         return None
@@ -148,31 +202,26 @@ def download_listing_image_bytes(
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else None
         if status not in (401, 403):
-            logger.warning("Skipping image download for URL %s: HTTP %s", cleaned, status)
+            logger.warning("Skipping image download for URL %s: HTTP %s", cleaned[:120], status)
             return None
         proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
-        if not proxy_urls:
-            logger.warning(
-                "Skipping image download for URL %s: HTTP %s (set %s or IMAGE_DOWNLOAD_PROXY_TEMPLATE)",
-                cleaned,
-                status,
-                _FLOW_PROXY_ENV[flow],
-            )
-            return None
-        for proxy_url in proxy_urls:
-            try:
-                proxy_response = httpx.get(
-                    proxy_url,
-                    timeout=timeout,
-                    follow_redirects=True,
-                    headers={"User-Agent": _BROWSER_USER_AGENT},
-                )
-                proxy_response.raise_for_status()
-                return proxy_response.content
-            except Exception as proxy_exc:
-                logger.debug("Proxy download failed for %s via %s: %s", cleaned, proxy_url[:80], proxy_exc)
-        logger.warning("Skipping image download for URL %s: HTTP %s and proxy fallback failed", cleaned, status)
+        content = _try_proxy_download(
+            image_url=cleaned,
+            flow=flow,
+            proxy_urls=proxy_urls,
+            timeout=timeout,
+            headers=headers,
+        )
+        if content is not None:
+            return content
+        logger.warning(
+            "Skipping image download for URL %s: HTTP %s; direct + %s proxy URL(s) failed (%s)",
+            cleaned[:120],
+            status,
+            len(proxy_urls),
+            image_download_config_summary(flow),
+        )
         return None
     except Exception as exc:
-        logger.warning("Skipping image download for URL %s: %s", cleaned, exc)
+        logger.warning("Skipping image download for URL %s: %s", cleaned[:120], exc)
         return None

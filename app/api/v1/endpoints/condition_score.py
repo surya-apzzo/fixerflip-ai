@@ -4,6 +4,7 @@ from fastapi import APIRouter, HTTPException
 from openai import APITimeoutError
 
 from app.core.config import settings
+from app.core.image_download import image_download_config_summary
 from app.engine.image_condition.services.aggregator import aggregate
 from app.engine.image_condition.services.image_filter import (
     classify_and_filter_urls,
@@ -36,12 +37,15 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                     "code": "IMAGE_DOWNLOAD_FAILED",
                     "message": (
                         "Could not download any listing photo URLs (often HTTP 403 from MLS/CDN). "
-                        "Re-host photos on a public S3/CDN URL your API can fetch."
+                        "Set CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER=https://www.crmls.org/ and "
+                        "CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE=https://images.weserv.nl/?url={url_no_scheme_encoded} "
+                        "on Railway (no quotes), redeploy, or re-host photos on public S3/CDN URLs."
                     ),
                     "meta": {
                         "total_input": total_input,
                         "images_discarded": discarded_count,
                         "download_failures": download_failures,
+                        "download_config": image_download_config_summary("condition_score"),
                     },
                 },
             )

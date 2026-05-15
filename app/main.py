@@ -9,6 +9,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.api.v1.api import api_router
 from app.core.config import settings
+from app.core.image_download import image_download_config_summary
 from app.core.error_handlers import register_exception_handlers
 from app.core.logging import setup_logging
 from app.middleware import RequestIdMiddleware, SecurityHeadersMiddleware
@@ -19,6 +20,11 @@ logger = logging.getLogger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logger.info("Starting %s (env=%s)", settings.PROJECT_NAME, settings.ENVIRONMENT)
+    logger.info(
+        "Image download config: renovation=%s condition_score=%s",
+        image_download_config_summary("renovation"),
+        image_download_config_summary("condition_score"),
+    )
     try:
         yield
     finally:
