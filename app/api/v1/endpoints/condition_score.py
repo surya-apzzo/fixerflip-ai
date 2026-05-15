@@ -6,7 +6,7 @@ from openai import APITimeoutError
 from app.core.config import settings
 from app.engine.image_condition.services.aggregator import aggregate
 from app.engine.image_condition.services.image_filter import classify_and_filter
-from app.engine.image_condition.services.vision_scorer import score_from_images
+from app.engine.image_condition.services.vision_scorer import ImageDownloadError, score_from_images
 from app.schemas.requests.property_condition import ConditionScoreRequest
 from app.schemas.responses.property_condition import ConditionScoreResponse
 
@@ -44,6 +44,24 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
 
     try:
         vision_result = await score_from_images(selected)
+    except ImageDownloadError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "IMAGE_DOWNLOAD_FAILED",
+                "message": (
+                    "Listing photos could not be downloaded from the server (HTTP 403 is common "
+                    "for Cotality/CRMLS URLs). Re-host images on your own storage (S3/CDN) and "
+                    "pass those URLs, or set IMAGE_DOWNLOAD_REFERER / IMAGE_DOWNLOAD_PROXY_TEMPLATE "
+                    "if your MLS feed allows server access."
+                ),
+                "meta": {
+                    "images_selected": exc.selected,
+                    "images_prepared": exc.prepared,
+                    "images_failed": exc.failed,
+                },
+            },
+        ) from exc
     except APITimeoutError as exc:
         raise HTTPException(
             status_code=504,
@@ -73,7 +91,7 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
         positive_signals=final["positive_signals"],
         caution_signals=final["caution_signals"],
         red_flags=final["red_flags"],
-        images_analyzed=len(selected),
+        images_analyzed=int(vision_result.get("images_prepared", len(final["room_scores"]))),
         images_discarded=discarded_count,
         cost_usd=final["cost_usd"],
     )

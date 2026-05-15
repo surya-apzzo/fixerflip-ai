@@ -34,6 +34,19 @@ _RETRYABLE_VISION_ERRORS = (APITimeoutError, RateLimitError)
 _DOWNLOAD_CONCURRENCY = 4
 
 
+class ImageDownloadError(Exception):
+    """Raised when every selected listing photo failed to download (e.g. MLS 403)."""
+
+    def __init__(self, *, selected: int, prepared: int, failed: int) -> None:
+        self.selected = selected
+        self.prepared = prepared
+        self.failed = failed
+        super().__init__(
+            f"Could not download any of {selected} image(s) for vision scoring "
+            f"({failed} failed). MLS/CDN URLs often block server access."
+        )
+
+
 def _load_vision_prompt() -> str:
     if _PROMPT_PATH.exists():
         content = _PROMPT_PATH.read_text(encoding="utf-8").strip()
@@ -189,26 +202,10 @@ async def _score_vision_chunk(
             vision_room_type=str(result.get("room_type", "")),
         )
 
-    slot_by_chunk_idx = {cidx: slot for slot, cidx in enumerate(chunk_indices)}
     room_scores: list[dict[str, Any]] = []
-    for i, img in enumerate(chunk):
-        if filled[i] is not None:
-            room_scores.append(filled[i])
-            continue
-        if i not in slot_by_chunk_idx:
-            signals = ["Image could not be loaded or decoded for scoring."]
-        elif slot_by_chunk_idx[i] >= len(parsed_chunk):
-            signals = ["Vision response missing this image; neutral score used."]
-        else:
-            signals = []
-        fallback_row = _build_room_score_row(
-            clip_room_type=img.room_type or "unknown",
-            score=50.0,
-            signals=signals,
-            red_flags=[],
-        )
-        if fallback_row is not None:
-            room_scores.append(fallback_row)
+    for i, row in enumerate(filled):
+        if row is not None:
+            room_scores.append(row)
 
     return room_scores, chunk_cost
 
@@ -227,6 +224,8 @@ async def score_from_images(selected_images: list[FilteredImage]) -> dict[str, A
     )
     room_scores: list[dict[str, Any]] = []
     total_cost = 0.0
+    images_prepared = 0
+    images_failed = 0
     vision_prompt = _load_vision_prompt()
     chunks = _chunk_images(selected_images)
     logger.info(
@@ -240,18 +239,17 @@ async def score_from_images(selected_images: list[FilteredImage]) -> dict[str, A
 
     for chunk_num, chunk in enumerate(chunks, start=1):
         chunk_indices, payload_urls = await _prepare_vision_payloads(chunk)
+        images_failed += len(chunk) - len(payload_urls)
         if not payload_urls:
-            for img in chunk:
-                row = _build_room_score_row(
-                    clip_room_type=img.room_type or "unknown",
-                    score=50.0,
-                    signals=["Image could not be loaded or decoded for scoring."],
-                    red_flags=[],
-                )
-                if row is not None:
-                    room_scores.append(row)
+            logger.warning(
+                "condition-score vision chunk %s/%s: no downloadable images in chunk of %s",
+                chunk_num,
+                len(chunks),
+                len(chunk),
+            )
             continue
 
+        images_prepared += len(payload_urls)
         logger.info(
             "condition-score vision chunk %s/%s: calling OpenAI with %s images",
             chunk_num,
@@ -274,4 +272,16 @@ async def score_from_images(selected_images: list[FilteredImage]) -> dict[str, A
             chunk_cost,
         )
 
-    return {"room_scores": room_scores, "cost_usd": round(total_cost, 6)}
+    if not room_scores and selected_images:
+        raise ImageDownloadError(
+            selected=len(selected_images),
+            prepared=images_prepared,
+            failed=images_failed or len(selected_images),
+        )
+
+    return {
+        "room_scores": room_scores,
+        "cost_usd": round(total_cost, 6),
+        "images_prepared": images_prepared,
+        "images_failed": images_failed,
+    }
