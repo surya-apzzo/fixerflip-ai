@@ -97,6 +97,7 @@ class FilteredImage:
     room_type: str
     confidence: float
     weight: float
+    image_bytes: bytes | None = None
 
 
 def _load_clip() -> bool:
@@ -171,6 +172,95 @@ def _download_image_bytes(image_url: str) -> bytes | None:
         return None
 
 
+def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | None:
+    try:
+        image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
+    except Exception as exc:
+        logger.warning("Invalid image bytes for %s: %s", source[:100], exc)
+        return None
+
+    if not _load_clip():
+        if _heuristic_home_image(source):
+            return FilteredImage(
+                image_url=source,
+                room_type="unknown",
+                confidence=0.5,
+                weight=0.1,
+                image_bytes=image_bytes,
+            )
+        return None
+
+    text_tokens = _clip_tokenize(ALL_LABELS)
+    try:
+        tensor = _clip_preproc(image).unsqueeze(0)
+        with _clip_torch.no_grad():
+            logits, _ = _clip_model(tensor, text_tokens)
+            probs = logits.softmax(dim=-1)[0]
+        if _is_non_property_image(probs):
+            logger.debug("Discarded non-property image (CLIP): %s", source[:100])
+            return None
+        house_match = _best_house_label(probs)
+        if house_match is None:
+            logger.debug("Discarded image with no confident house label: %s", source[:100])
+            return None
+        room_type, confidence = house_match
+        return FilteredImage(
+            image_url=source,
+            room_type=room_type,
+            confidence=confidence,
+            weight=ROOM_WEIGHTS[room_type],
+            image_bytes=image_bytes,
+        )
+    except Exception as exc:
+        logger.warning("CLIP classification skipped for %s: %s", source[:100], exc)
+        return None
+
+
+def classify_and_filter_inputs(
+    items: list[tuple[str | None, bytes | None]],
+) -> dict[str, object]:
+    """
+    Filter listing photos. Each item is (optional_url, optional_bytes).
+
+    When bytes are provided (client/base64 path), the server does not download the URL.
+    """
+    if not items:
+        return {"selected": [], "discarded_count": 0, "total_input": 0}
+
+    selected: list[FilteredImage] = []
+    discarded_count = 0
+
+    for url, image_bytes in items:
+        source = (url or "").strip() or "embedded-image"
+        if image_bytes is not None:
+            row = _clip_classify_bytes(image_bytes, source=source)
+            if row is None:
+                discarded_count += 1
+            else:
+                selected.append(row)
+            continue
+
+        if not (url or "").strip():
+            discarded_count += 1
+            continue
+
+        downloaded = _download_image_bytes(url.strip())
+        if downloaded is None:
+            discarded_count += 1
+            continue
+        row = _clip_classify_bytes(downloaded, source=url.strip())
+        if row is None:
+            discarded_count += 1
+        else:
+            selected.append(row)
+
+    return {
+        "selected": selected,
+        "discarded_count": discarded_count,
+        "total_input": len(items),
+    }
+
+
 def classify_and_filter(image_urls: list[str]) -> dict[str, object]:
     """
     Keep only house/property photos (kitchen, bath, living areas, basement, front exterior).
@@ -179,66 +269,6 @@ def classify_and_filter(image_urls: list[str]) -> dict[str, object]:
     and never sent to vision scoring.
     """
     clean_urls = [url.strip() for url in image_urls if url and url.strip()]
-    if not clean_urls:
-        return {"selected": [], "discarded_count": 0, "total_input": 0}
-
-    if not _load_clip():
-        selected = [
-            FilteredImage(
-                image_url=url,
-                room_type="unknown",
-                confidence=0.5,
-                weight=0.1,
-            )
-            for url in clean_urls
-            if _heuristic_home_image(url)
-        ]
-        return {
-            "selected": selected,
-            "discarded_count": max(0, len(clean_urls) - len(selected)),
-            "total_input": len(clean_urls),
-        }
-
-    text_tokens = _clip_tokenize(ALL_LABELS)
-    selected: list[FilteredImage] = []
-    discarded_count = 0
-
-    for url in clean_urls:
-        image_bytes = _download_image_bytes(url)
-        if image_bytes is None:
-            discarded_count += 1
-            continue
-        try:
-            image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
-            tensor = _clip_preproc(image).unsqueeze(0)
-            with _clip_torch.no_grad():
-                logits, _ = _clip_model(tensor, text_tokens)
-                probs = logits.softmax(dim=-1)[0]
-            if _is_non_property_image(probs):
-                logger.debug("Discarded non-property image (CLIP): %s", url[:100])
-                discarded_count += 1
-                continue
-            house_match = _best_house_label(probs)
-            if house_match is None:
-                logger.debug("Discarded image with no confident house label: %s", url[:100])
-                discarded_count += 1
-                continue
-            room_type, confidence = house_match
-            selected.append(
-                FilteredImage(
-                    image_url=url,
-                    room_type=room_type,
-                    confidence=confidence,
-                    weight=ROOM_WEIGHTS[room_type],
-                )
-            )
-        except Exception as exc:
-            logger.warning("CLIP classification skipped for URL %s: %s", url, exc)
-            discarded_count += 1
-
-    return {
-        "selected": selected,
-        "discarded_count": discarded_count,
-        "total_input": len(clean_urls),
-    }
+    items = [(url, None) for url in clean_urls]
+    return classify_and_filter_inputs(items)
 
