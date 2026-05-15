@@ -10,8 +10,8 @@ class RenovationEstimateRequest(BaseModel):
     address: str = ""
     city: str = ""
     sqft: float
-    beds: int
-    baths: float
+    beds: int = 0
+    baths: float = 0.0
     lot_size: float = 0.0
     year_built: int | None = None
     property_type: str = "SFR"

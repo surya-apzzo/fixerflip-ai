@@ -69,7 +69,7 @@ def _has_style_upgrade_request(payload: RenovationEstimateRequest) -> bool:
 
 def _resolve_visual_scope_hint(payload: RenovationEstimateRequest) -> str:
     """Derived edit-scope tag (reference vs elements). Quality/finish is only desired_quality_level."""
-    if payload.visual_type == "upload_my_own_reference_photo" and payload.reference_image_url:
+    if (payload.reference_image_url or "").strip():
         return "reference_style"
     if payload.visual_type == "choose_an_existing_style":
         return "existing_style"
@@ -173,6 +173,7 @@ async def _enforce_repair_only_guardrail(
         retry_edit_result = await edit_property_image_from_url(
             image_url=payload.image_url,
             instruction=strict_retry_instruction,
+            reference_image_url="",
         )
         retry_url = await upload_base64_image_to_bucket(
             image_base64=retry_edit_result.image_base64,
@@ -214,6 +215,13 @@ async def _generate_renovated_image_url(
         user_scope_categories=user_scope_categories,
         has_detected_issues=has_detected_issues,
     )
+    if (payload.reference_image_url or "").strip():
+        source = (payload.image_url or "").lower()
+        if "renovated-images" in source or "/renovated/" in source:
+            pipeline_warnings.append(
+                "image_url appears to be a prior renovation preview; use the original listing photo "
+                "as image_url for best reference-style results."
+            )
     instruction_for_edit = build_instruction_for_edit(
         user_inputs=payload.user_inputs,
         type_of_renovation=payload.type_of_renovation,
@@ -228,6 +236,7 @@ async def _generate_renovated_image_url(
         edit_result = await edit_property_image_from_url(
             image_url=payload.image_url,
             instruction=instruction_for_edit,
+            reference_image_url=payload.reference_image_url,
         )
     except Exception as edit_exc:
         logger.warning("Renovation image edit failed: %s", edit_exc)

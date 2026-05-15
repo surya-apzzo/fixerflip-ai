@@ -1,0 +1,11 @@
+MODE: Reference-guided material/style transfer (two input images).
+
+Image 1 = property listing photo to edit. Image 2 = style/material reference only.
+
+Rules:
+- Apply image 2's material, color, texture, and finish to the user-selected elements on image 1 only.
+- The material change must be clearly visible and cover every visible instance of each selected element in frame.
+- Keep image 1's camera angle, framing, building geometry, and all unselected objects unchanged.
+- Do NOT copy furniture, people, plants, doors, windows, sky, or room layout from image 2.
+- Photorealistic real-estate photography only: natural lighting, real materials, believable shadows.
+- FORBIDDEN: cartoon outlines, illustration, sketch, painterly filter, exaggerated HDR, plastic CGI look, watermarks, or text.

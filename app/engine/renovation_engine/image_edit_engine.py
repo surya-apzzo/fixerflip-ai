@@ -23,6 +23,7 @@ _PROMPTS_DIR = Path(__file__).resolve().parent.parent.parent / "prompts"
 _EDIT_PROMPT_BASE = _PROMPTS_DIR / "editing_image_visual.txt"
 _EDIT_PROMPT_BROAD = _PROMPTS_DIR / "editing_image_constraints_broad.txt"
 _EDIT_PROMPT_TARGETED = _PROMPTS_DIR / "editing_image_constraints_targeted.txt"
+_EDIT_PROMPT_REFERENCE = _PROMPTS_DIR / "editing_image_constraints_reference.txt"
 IMAGE_CACHE_DIR = Path(".cache/renovation_image_downloads")
 IMAGE_CACHE_TTL_SECONDS = settings.REDIS_CACHE_TTL_SECONDS
 _DEFAULT_IMAGE_EDIT_INSTRUCTION = (
@@ -149,17 +150,10 @@ _EXTERIOR_FLOORING_HINT = (
 )
 _INTERIOR_FLOORING_HINT = "interior floors and floor finish"
 
-_EXTERIOR_FLOORING_ACTION = (
-    "Exterior flooring directive: update only visible outdoor walkable surfaces (deck, patio, porch flooring, "
-    "pavers, or exterior tile). Preserve the house walls, roof, windows, doors, driveway, fence, and landscaping "
-    "unless those are explicitly selected too."
-)
-
 _ELEMENT_ACTION_HINTS = {
     "flooring": (
-        "Flooring directive: visibly replace the existing floor finish in all clearly visible walkable floor areas "
-        "with a new tile look that is materially different from the source floor. Keep perspective and room geometry "
-        "identical, and do not alter cabinets, counters, walls, ceiling, appliances, furniture, or decor."
+        "Flooring directive: visibly replace the existing floor/walkable-surface finish everywhere it appears "
+        "in frame for this element. Keep camera angle and scene geometry identical; do not alter unselected elements."
     ),
     "paint": (
         "Paint directive: for interiors, update only the requested wall/ceiling paint surfaces. "
@@ -234,10 +228,28 @@ def _element_description(element: str, *, exterior: bool) -> str:
     return _ELEMENT_HINTS.get(element, element)
 
 
-def _element_action_hint(element: str, *, exterior: bool) -> str | None:
-    if element == "flooring" and exterior:
-        return _EXTERIOR_FLOORING_ACTION
-    return _ELEMENT_ACTION_HINTS.get(element)
+def _reference_style_element_hint(element: str, *, exterior: bool) -> str:
+    """Generic reference transfer for any allowed renovation element (not flooring-specific)."""
+    scope = _element_description(element, exterior=exterior)
+    label = element.replace("_", " ")
+    return (
+        f"Reference style ({label}): copy material, color, texture, and finish cues from image 2 onto "
+        f"every visible {scope} in image 1. The change must be clearly visible compared with the source."
+    )
+
+
+def _element_action_hint(
+    element: str,
+    *,
+    exterior: bool,
+    reference_attached: bool = False,
+) -> str | None:
+    base = _ELEMENT_ACTION_HINTS.get(element)
+    if not base:
+        return None
+    if reference_attached:
+        return f"{_reference_style_element_hint(element, exterior=exterior)} {base}"
+    return base
 
 
 def _is_generic_renovate_request(text: str) -> bool:
@@ -302,9 +314,8 @@ def _append_selected_element_directives(
     elements: list[str],
     element_descriptions: list[str],
     type_of_renovation: str,
+    reference_image_attached: bool = False,
 ) -> None:
-    if visual_type != "select_elements_to_renovate":
-        return
     exterior = _is_exterior_renovation(type_of_renovation)
     if element_descriptions:
         directive_lines.append(
@@ -314,7 +325,7 @@ def _append_selected_element_directives(
         if exterior:
             directive_lines.append(
                 "Do NOT modify unselected exterior features (roof, windows, doors, siding, trim paint, "
-                "deck/patio flooring, landscaping, driveway, fence) unless explicitly selected or required by the user instruction."
+                "landscaping, driveway, fence) unless explicitly selected or required by the user instruction."
             )
             directive_lines.append(
                 "At least one visible change must be made for each selected element while preserving "
@@ -328,9 +339,15 @@ def _append_selected_element_directives(
                 "At least one visible change must be made for each selected element while preserving the original room layout."
             )
         for element in elements:
-            action_hint = _element_action_hint(element, exterior=exterior)
+            action_hint = _element_action_hint(
+                element,
+                exterior=exterior,
+                reference_attached=reference_image_attached,
+            )
             if action_hint:
                 directive_lines.append(action_hint)
+        return
+    if visual_type != "select_elements_to_renovate":
         return
     directive_lines.append(
         "No specific elements were selected. Use conservative damage-repair mode only."
@@ -351,14 +368,46 @@ def _append_reference_directives(
     *,
     visual_type: str,
     reference_image_url: str,
+    reference_image_attached: bool,
+    element_descriptions: list[str],
+    elements: list[str] | None = None,
+    type_of_renovation: str = "",
 ) -> None:
-    if visual_type == "upload_my_own_reference_photo" and reference_image_url:
-        directive_lines.append(f"Reference image URL: {reference_image_url}")
+    ref = (reference_image_url or "").strip()
+    if not ref and not reference_image_attached:
+        return
+    if reference_image_attached:
         directive_lines.append(
-            "Use the reference image as style guidance for color/material/finish while keeping source structure unchanged."
+            "INPUT IMAGES (order matters): Image 1 = property photo to edit (same camera, layout, and composition). "
+            "Image 2 = user style/material reference for the selected renovation elements."
         )
-    elif reference_image_url:
-        directive_lines.append(f"Reference image URL: {reference_image_url}")
+        if element_descriptions:
+            directive_lines.append(
+                "Apply image 2 styling ONLY to these selected elements on image 1: "
+                + ", ".join(element_descriptions)
+                + ". Leave every unselected surface unchanged."
+            )
+        else:
+            directive_lines.append(
+                "Use image 2 as style guidance only where the user instruction requires a visible change."
+            )
+        directive_lines.append(
+            "The edit must be clearly visible on the selected surfaces. Match image 2's surface appearance "
+            "(color, pattern, sheen, grout/joint treatment) on image 1—not image 2's furniture, plants, doors, or sky."
+        )
+        selected = {e.strip().lower() for e in (elements or []) if e}
+        if _is_exterior_renovation(type_of_renovation) and "flooring" in selected:
+            directive_lines.append(
+                "Scope hint (exterior flooring): include deck boards, stair treads, and patio/paver fields "
+                "visible in image 1 unless the user note narrows scope."
+            )
+        return
+    if visual_type == "upload_my_own_reference_photo" and ref:
+        directive_lines.append(
+            "Reference image was provided but could not be downloaded; apply conservative edits only."
+        )
+    elif ref:
+        directive_lines.append(f"Reference image URL (not attached to model): {ref}")
 
 
 def _append_user_note_directive(directive_lines: list[str], *, base_instruction: str) -> None:
@@ -400,24 +449,50 @@ def build_instruction_for_edit(
     elements = [e.strip().lower() for e in (renovation_elements or []) if e and e.strip()]
     exterior = _is_exterior_renovation(type_of_renovation)
     element_descriptions = [_element_description(e, exterior=exterior) for e in elements]
+    ref_url = (reference_image_url or "").strip()
+    reference_image_attached = bool(ref_url)
 
-    directive_lines = [
-        "Full-scene preservation: the output must include the SAME field of view as the source—every pixel "
-        "region from the left edge through the right edge. Do not crop, zoom, reframe, or shift the camera. "
-        "Keep all doorways, hallway openings, mirrors, windows, ceiling fans, wall art, mobile cabinets/carts, "
-        "built-ins, trim, and furniture that appear in the source unless the user explicitly asked to remove them.",
-        "Primary directive: execute the explicit user instruction exactly and conservatively.",
-        "Hard constraint: change only the specifically requested parts of the image.",
-        "Hard constraint: do not add, remove, restage, redesign, or alter any non-requested objects/surfaces.",
-        "Preserve original structural material (wood remains wood; concrete remains concrete).",
-        f"Renovation type: {type_of_renovation}",
-        f"Visual type: {visual_type}",
-        f"Desired quality level: {desired_quality_level}",
-        f"Visual scope preset: {visual_scope_hint}",
-    ]
+    if reference_image_attached:
+        directive_lines = [
+            "REFERENCE STYLE EDIT: image 2 supplies the target look; image 1 supplies composition and geometry.",
+            "Output must look like a real MLS photograph (natural light, real materials)—never cartoon, "
+            "illustration, sketch, or heavy HDR outlines.",
+            "Keep the same field of view, camera angle, and property layout as image 1 edge to edge.",
+            "Change ONLY the user-selected renovation elements; leave every other surface and object as in image 1.",
+            f"Renovation type: {type_of_renovation}",
+            f"Visual type: {visual_type or 'reference_guided'}",
+            f"Desired quality level: {desired_quality_level}",
+            f"Visual scope preset: {visual_scope_hint}",
+        ]
+    else:
+        directive_lines = [
+            "Full-scene preservation: the output must include the SAME field of view as the source—every pixel "
+            "region from the left edge through the right edge. Do not crop, zoom, reframe, or shift the camera. "
+            "Keep all doorways, hallway openings, mirrors, windows, ceiling fans, wall art, mobile cabinets/carts, "
+            "built-ins, trim, and furniture that appear in the source unless the user explicitly asked to remove them.",
+            "Primary directive: execute the explicit user instruction exactly and conservatively.",
+            "Hard constraint: change only the specifically requested parts of the image.",
+            "Hard constraint: do not add, remove, restage, redesign, or alter any non-requested objects/surfaces.",
+            "Preserve original structural material (wood remains wood; concrete remains concrete).",
+            f"Renovation type: {type_of_renovation}",
+            f"Visual type: {visual_type}",
+            f"Desired quality level: {desired_quality_level}",
+            f"Visual scope preset: {visual_scope_hint}",
+        ]
 
     if base_instruction:
         _append_authoritative_user_edit_block(directive_lines, base_instruction=base_instruction)
+
+    if reference_image_attached:
+        _append_reference_directives(
+            directive_lines,
+            visual_type=visual_type,
+            reference_image_url=reference_image_url,
+            reference_image_attached=True,
+            element_descriptions=element_descriptions,
+            elements=elements,
+            type_of_renovation=type_of_renovation,
+        )
 
     issues = [i.strip() for i in (detected_issues or []) if i and i.strip()]
     if issues:
@@ -429,7 +504,13 @@ def build_instruction_for_edit(
             base_instruction=base_instruction,
         )
     else:
-        directive_lines.append(_NO_ISSUES_DETECTED_INSTRUCTION)
+        if elements:
+            directive_lines.append(
+                "No AI-detected damage issues. Apply user-selected element upgrades only; "
+                "do not redesign or restage unselected areas."
+            )
+        else:
+            directive_lines.append(_NO_ISSUES_DETECTED_INSTRUCTION)
 
     _append_selected_element_directives(
         directive_lines,
@@ -437,12 +518,18 @@ def build_instruction_for_edit(
         elements=elements,
         element_descriptions=element_descriptions,
         type_of_renovation=type_of_renovation,
+        reference_image_attached=reference_image_attached,
     )
-    _append_reference_directives(
-        directive_lines,
-        visual_type=visual_type,
-        reference_image_url=reference_image_url,
-    )
+    if not reference_image_attached:
+        _append_reference_directives(
+            directive_lines,
+            visual_type=visual_type,
+            reference_image_url=reference_image_url,
+            reference_image_attached=False,
+            element_descriptions=element_descriptions,
+            elements=elements,
+            type_of_renovation=type_of_renovation,
+        )
     _append_user_note_directive(directive_lines, base_instruction=base_instruction)
     if base_instruction:
         directive_lines.append(
@@ -476,18 +563,37 @@ _TARGETED_CHANGE = _read_prompt_text(
     _EDIT_PROMPT_TARGETED,
     "MODE: Targeted edit only. Apply only what the user requested; keep the rest of the scene unchanged.",
 )
+_REFERENCE_STYLE_CHANGE = _read_prompt_text(
+    _EDIT_PROMPT_REFERENCE,
+    "MODE: Reference-guided transfer from image 2 onto selected elements in image 1. Photorealistic output only.",
+)
 
-def _select_constraints_for_instruction(instruction: str) -> str:
-    # Any non-empty instruction should default to strict targeted-edit mode.
+
+def _select_constraints_for_instruction(instruction: str, *, reference_attached: bool = False) -> str:
+    if reference_attached:
+        return _REFERENCE_STYLE_CHANGE
     if (instruction or "").strip():
         return _TARGETED_CHANGE
     return _BROAD_RENOVATION
+
+
+def _guess_image_filename(media_type: str, *, role: str) -> str:
+    mt = (media_type or "image/png").split(";")[0].strip().lower()
+    ext = {
+        "image/jpeg": "jpg",
+        "image/jpg": "jpg",
+        "image/png": "png",
+        "image/webp": "webp",
+        "image/gif": "gif",
+    }.get(mt, "png")
+    return f"{role}.{ext}"
 
 
 async def edit_property_image_from_url(
     *,
     image_url: str,
     instruction: str,
+    reference_image_url: str = "",
     preserve_elements: str | None = None,
 ) -> ImageEditResult:
     if not settings.OPENAI_API_KEY:
@@ -507,13 +613,41 @@ async def edit_property_image_from_url(
             "IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
         ) from exc
 
+    image_files: list[tuple[str, bytes, str]] = [
+        (_guess_image_filename(media_type, role="property_image"), image_bytes, media_type),
+    ]
+    ref_url = (reference_image_url or "").strip()
+    if ref_url:
+        try:
+            ref_bytes, ref_media = await _download_source_image(ref_url)
+            image_files.append(
+                (_guess_image_filename(ref_media, role="reference_image"), ref_bytes, ref_media)
+            )
+        except Exception as exc:
+            logger.warning("Reference image download failed for edit (url=%s): %s", ref_url, exc)
+            raise ValueError(
+                "Reference image URL could not be downloaded. "
+                "Check that the URL is public/reachable, or configure IMAGE_DOWNLOAD_REFERER / "
+                "IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
+            ) from exc
+
+    reference_attached = len(image_files) > 1
     prompt_template = _load_edit_prompt_text()
     constraints = (
         preserve_elements.strip()
         if preserve_elements is not None
-        else _select_constraints_for_instruction(instruction.strip())
+        else _select_constraints_for_instruction(instruction.strip(), reference_attached=reference_attached)
     )
-    prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
+    if reference_attached:
+        prompt = (
+            f"{prompt_template}\n\n"
+            "REFERENCE EDIT: Two images are attached—property first, reference second. "
+            "Follow the Constraints block for how to use image 2.\n\n"
+            f"User request:\n{instruction.strip()}\n\n"
+            f"Constraints:\n{constraints}"
+        )
+    else:
+        prompt = f"{prompt_template}\n\nUser request: {instruction.strip()}\n\nConstraints:\n{constraints}"
 
     timeout_sec = float(settings.OPENAI_IMAGE_EDIT_TIMEOUT_SECONDS)
     max_retries = int(settings.OPENAI_IMAGE_EDIT_MAX_RETRIES)
@@ -528,15 +662,19 @@ async def edit_property_image_from_url(
     for attempt in range(max_retries + 1):
         try:
             model = settings.default_openai_image_edit_model
+            edit_image: tuple[str, bytes, str] | list[tuple[str, bytes, str]] = (
+                image_files if len(image_files) > 1 else image_files[0]
+            )
             edit_kwargs: dict = {
                 "model": model,
-                "image": ("property_image.png", image_bytes, media_type),
+                "image": edit_image,
                 "prompt": prompt,
                 "size": _select_gpt_image_edit_size(image_bytes),
                 "quality": "high",
             }
             if _image_edit_supports_input_fidelity(model):
-                edit_kwargs["input_fidelity"] = "high"
+                # High fidelity locks pixels and blocks visible material swaps; use low when a reference is attached.
+                edit_kwargs["input_fidelity"] = "low" if reference_attached else "high"
             response = await client.images.edit(**edit_kwargs)
 
             data = getattr(response, "data", None) or []

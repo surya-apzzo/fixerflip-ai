@@ -47,6 +47,7 @@ _ALLOWED_RENOVATION_ELEMENTS_EXTERIOR: frozenset[str] = frozenset(
         "driveway",
         "fence",
         "flooring",
+        "stair",
     }
 )
 
@@ -76,8 +77,7 @@ def _canonical_renovation_element(raw: str, *, renovation_type: str) -> str:
         if canonical == "roof":
             return "ceiling"
         return canonical
-    if canonical == "ceiling":
-        return "roof"
+    # Exterior allowlist has no roof; keep ceiling/paint/siding tokens as-is for validation.
     return canonical
 
 
@@ -98,6 +98,7 @@ _RENOVATION_ELEMENT_ALIASES = {
     "cabinetry": "cabinet",
     "windows": "window",
     "staircase": "stair",
+    "stairs": "stair",
     "backsplash": "cabinet",
     "doors": "door",
     "paints": "paint",
