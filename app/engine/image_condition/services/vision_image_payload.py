@@ -9,14 +9,13 @@ from io import BytesIO
 import httpx
 from PIL import Image
 
-logger = logging.getLogger(__name__)
+from app.engine.renovation_engine.image_edit_engine import _build_image_download_headers
 
-_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
+logger = logging.getLogger(__name__)
 _MAX_DOWNLOAD_BYTES = 20 * 1024 * 1024
-_MAX_SIDE = 2048
+# Smaller than renovation edits — fewer vision tokens, faster OpenAI calls.
+_MAX_SIDE = 1280
+_JPEG_QUALITY = 82
 
 
 async def image_url_to_openai_vision_data_url(image_url: str) -> str:
@@ -29,8 +28,8 @@ async def image_url_to_openai_vision_data_url(image_url: str) -> str:
     if not url:
         raise ValueError("Empty image URL.")
 
-    async with httpx.AsyncClient(timeout=25.0, follow_redirects=True) as client:
-        response = await client.get(url, headers={"User-Agent": _BROWSER_USER_AGENT})
+    async with httpx.AsyncClient(timeout=45.0, follow_redirects=True) as client:
+        response = await client.get(url, headers=_build_image_download_headers(url))
         response.raise_for_status()
         body = response.content
         ctype = (response.headers.get("content-type") or "").split(";")[0].strip().lower()
@@ -50,7 +49,7 @@ async def image_url_to_openai_vision_data_url(image_url: str) -> str:
             nh = max(1, int(h * scale))
             im = im.resize((nw, nh), Image.Resampling.LANCZOS)
         out = BytesIO()
-        im.save(out, format="JPEG", quality=90, optimize=True)
+        im.save(out, format="JPEG", quality=_JPEG_QUALITY, optimize=True)
         jpeg_bytes = out.getvalue()
 
     if len(jpeg_bytes) > _MAX_DOWNLOAD_BYTES:

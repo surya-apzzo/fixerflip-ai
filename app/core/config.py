@@ -71,6 +71,24 @@ class Settings(BaseSettings):
     )
     OPENAI_MODEL: str = ""
     OPENAI_VISION_ENABLED: bool = False
+    OPENAI_CONDITION_SCORE_VISION_TIMEOUT_SECONDS: float = Field(
+        default=180.0,
+        ge=45.0,
+        le=600.0,
+        description="HTTP timeout per OpenAI vision call for POST /condition-score (many images need more time).",
+    )
+    CONDITION_SCORE_VISION_CHUNK_SIZE: int = Field(
+        default=6,
+        ge=1,
+        le=20,
+        description="Max images per OpenAI vision request in condition-score (lower = faster, more reliable).",
+    )
+    OPENAI_CONDITION_SCORE_VISION_MAX_RETRIES: int = Field(
+        default=1,
+        ge=0,
+        le=3,
+        description="Retries per vision chunk on timeout / rate limit / 5xx.",
+    )
     RENOVATION_IMAGE_STRICT_GUARDRAIL: bool = Field(
         default=False,
         description=(

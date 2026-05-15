@@ -5,9 +5,9 @@ from pydantic import BaseModel, Field
 
 class RoomScore(BaseModel):
     room_type: str
-    score: float = Field(ge=0, le=100)
-    weight: float = Field(ge=0)
+    score: float = Field(ge=0, le=100, description="Vision condition score for this photo (0-100).")
     signals: list[str] = Field(default_factory=list)
+    red_flags: list[str] = Field(default_factory=list)
 
 
 class ConditionScoreResponse(BaseModel):

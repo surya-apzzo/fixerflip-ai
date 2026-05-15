@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import logging
+import re
 from dataclasses import dataclass
 
 import httpx
@@ -10,6 +11,16 @@ from PIL import Image
 from app.engine.renovation_engine.image_edit_engine import _build_image_download_headers
 
 logger = logging.getLogger(__name__)
+
+# Only these labels count toward condition score (actual house / unit photos).
+HOUSE_ROOM_LABELS: tuple[str, ...] = (
+    "kitchen interior",
+    "bathroom interior",
+    "living room interior",
+    "bedroom interior",
+    "basement interior",
+    "exterior front of house",
+)
 
 ROOM_WEIGHTS: dict[str, float] = {
     "kitchen interior": 0.35,
@@ -20,19 +31,59 @@ ROOM_WEIGHTS: dict[str, float] = {
     "exterior front of house": 0.05,
 }
 
-DISCARD_ROOMS: set[str] = {
-    "floor plan diagram",
-    "neighborhood street view",
-    "aerial view",
-    "swimming pool",
-    "garage exterior",
+# Non-property / non-house images — never used for condition score.
+NON_PROPERTY_LABELS: frozenset[str] = frozenset(
+    {
+        "floor plan diagram",
+        "neighborhood street view",
+        "aerial view",
+        "swimming pool",
+        "garage exterior",
+        "driveway or parking lot",
+        "backyard only no house",
+        "map or satellite image",
+        "document screenshot or logo",
+        "community amenity or clubhouse",
+    }
+)
+
+# Minimum CLIP probability on a house label to keep an ambiguous image.
+_MIN_HOUSE_LABEL_PROBABILITY = 0.12
+
+ALL_LABELS = [*HOUSE_ROOM_LABELS, *sorted(NON_PROPERTY_LABELS)]
+HOUSE_LABEL_INDICES = [ALL_LABELS.index(label) for label in HOUSE_ROOM_LABELS]
+NON_PROPERTY_LABEL_INDICES = {ALL_LABELS.index(label) for label in NON_PROPERTY_LABELS}
+
+# Vision prompt uses short names; CLIP + weights use long labels.
+_VISION_ROOM_TYPE_ALIASES: dict[str, str] = {
+    "kitchen": "kitchen interior",
+    "bathroom": "bathroom interior",
+    "bath": "bathroom interior",
+    "living room": "living room interior",
+    "living": "living room interior",
+    "livingroom": "living room interior",
+    "bedroom": "bedroom interior",
+    "bed": "bedroom interior",
+    "basement": "basement interior",
+    "exterior": "exterior front of house",
+    "exterior front": "exterior front of house",
+    "front of house": "exterior front of house",
+    "house exterior": "exterior front of house",
 }
 
-# If CLIP's top label is in DISCARD_ROOMS but below this confidence, use the best non-discard label instead
-# (ViT-B/32 often mislabels interiors as "garage exterior").
-_CLIP_CONFIDENT_DISCARD_THRESHOLD = 0.85
 
-ALL_LABELS = [*ROOM_WEIGHTS.keys(), *DISCARD_ROOMS]
+def normalize_house_room_type(raw: str, *, clip_fallback: str = "") -> str | None:
+    """Map vision/CLIP labels to canonical ``ROOM_WEIGHTS`` keys."""
+    text = re.sub(r"\s+", " ", (raw or "").strip().lower()).replace("_", " ")
+    if text in ROOM_WEIGHTS:
+        return text
+    if text in _VISION_ROOM_TYPE_ALIASES:
+        return _VISION_ROOM_TYPE_ALIASES[text]
+    clip = re.sub(r"\s+", " ", (clip_fallback or "").strip().lower())
+    if clip in ROOM_WEIGHTS:
+        return clip
+    return None
+
 
 _clip_model = None
 _clip_preproc = None
@@ -66,17 +117,47 @@ def _load_clip() -> bool:
 
 
 def _heuristic_home_image(url: str) -> bool:
+    """URL-only filter when CLIP is unavailable (less accurate than vision classification)."""
     lowered = (url or "").lower()
     discard_terms = (
         "floorplan",
         "floor-plan",
+        "floor_plan",
+        "siteplan",
+        "site-plan",
+        "plat",
+        "survey",
         "map",
         "streetview",
+        "street-view",
         "aerial",
+        "drone",
+        "satellite",
         "pool",
         "garage",
+        "amenity",
+        "clubhouse",
+        "logo",
+        "document",
+        "screenshot",
+        "thumbnail-doc",
     )
     return not any(term in lowered for term in discard_terms)
+
+
+def _best_house_label(probs) -> tuple[str, float] | None:
+    """Best-scoring house label, or None if nothing crosses the keep threshold."""
+    best_idx = max(HOUSE_LABEL_INDICES, key=lambda i: float(probs[i].item()))
+    confidence = float(probs[best_idx].item())
+    if confidence < _MIN_HOUSE_LABEL_PROBABILITY:
+        return None
+    return ALL_LABELS[best_idx], confidence
+
+
+def _is_non_property_image(probs) -> bool:
+    """True when the strongest CLIP label is explicitly non-property."""
+    best_idx = int(probs.argmax().item())
+    return best_idx in NON_PROPERTY_LABEL_INDICES
 
 
 def _download_image_bytes(image_url: str) -> bytes | None:
@@ -92,8 +173,10 @@ def _download_image_bytes(image_url: str) -> bytes | None:
 
 def classify_and_filter(image_urls: list[str]) -> dict[str, object]:
     """
-    Keep all home-related images after filtering.
-    No fixed image cap is applied in this stage.
+    Keep only house/property photos (kitchen, bath, living areas, basement, front exterior).
+
+    Floor plans, aerials, pools, street views, maps, and similar images are discarded
+    and never sent to vision scoring.
     """
     clean_urls = [url.strip() for url in image_urls if url and url.strip()]
     if not clean_urls:
@@ -131,23 +214,22 @@ def classify_and_filter(image_urls: list[str]) -> dict[str, object]:
             with _clip_torch.no_grad():
                 logits, _ = _clip_model(tensor, text_tokens)
                 probs = logits.softmax(dim=-1)[0]
-            best_idx = int(probs.argmax().item())
-            room_type = ALL_LABELS[best_idx]
-            confidence = float(probs[best_idx].item())
-            if room_type in DISCARD_ROOMS and confidence >= _CLIP_CONFIDENT_DISCARD_THRESHOLD:
+            if _is_non_property_image(probs):
+                logger.debug("Discarded non-property image (CLIP): %s", url[:100])
                 discarded_count += 1
                 continue
-            if room_type in DISCARD_ROOMS:
-                keep_indices = [i for i, lab in enumerate(ALL_LABELS) if lab not in DISCARD_ROOMS]
-                best_idx = max(keep_indices, key=lambda i: float(probs[i].item()))
-                room_type = ALL_LABELS[best_idx]
-                confidence = float(probs[best_idx].item())
+            house_match = _best_house_label(probs)
+            if house_match is None:
+                logger.debug("Discarded image with no confident house label: %s", url[:100])
+                discarded_count += 1
+                continue
+            room_type, confidence = house_match
             selected.append(
                 FilteredImage(
                     image_url=url,
                     room_type=room_type,
                     confidence=confidence,
-                    weight=ROOM_WEIGHTS.get(room_type, 0.1),
+                    weight=ROOM_WEIGHTS[room_type],
                 )
             )
         except Exception as exc:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, HTTPException
+from openai import APITimeoutError
 
+from app.core.config import settings
 from app.engine.image_condition.services.aggregator import aggregate
 from app.engine.image_condition.services.image_filter import classify_and_filter
 from app.engine.image_condition.services.vision_scorer import score_from_images
@@ -26,7 +28,11 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                 "errors": [
                     {
                         "field": "image_urls",
-                        "message": "No usable property images found. Verify image URLs are valid and publicly accessible.",
+                        "message": (
+                            "No usable house/property photos found after filtering. "
+                            "Floor plans, aerials, pools, and street views are excluded. "
+                            "Verify image URLs are valid and publicly accessible."
+                        ),
                     }
                 ],
                 "meta": {
@@ -36,7 +42,25 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
             },
         )
 
-    vision_result = await score_from_images(selected)
+    try:
+        vision_result = await score_from_images(selected)
+    except APITimeoutError as exc:
+        raise HTTPException(
+            status_code=504,
+            detail={
+                "code": "VISION_TIMEOUT",
+                "message": (
+                    f"OpenAI vision timed out after {settings.OPENAI_CONDITION_SCORE_VISION_TIMEOUT_SECONDS}s. "
+                    f"Try fewer images, lower CONDITION_SCORE_VISION_CHUNK_SIZE (current "
+                    f"{settings.CONDITION_SCORE_VISION_CHUNK_SIZE}), or raise "
+                    "OPENAI_CONDITION_SCORE_VISION_TIMEOUT_SECONDS."
+                ),
+                "meta": {
+                    "images_selected": len(selected),
+                    "chunk_size": settings.CONDITION_SCORE_VISION_CHUNK_SIZE,
+                },
+            },
+        ) from exc
     final = aggregate(vision_result)
 
     return ConditionScoreResponse(

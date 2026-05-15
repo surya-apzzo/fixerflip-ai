@@ -49,6 +49,8 @@ _BROWSER_USER_AGENT = (
 _MLS_HOST_REFERERS: dict[str, str] = {
     "crmls.org": "https://www.crmls.org/",
     "mlslistings.com": "https://www.mlslistings.com/",
+    "realty.dev": "https://www.realty.dev/",
+    "cotality.com": "https://www.cotality.com/",
 }
 
 _OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS = 0.8
