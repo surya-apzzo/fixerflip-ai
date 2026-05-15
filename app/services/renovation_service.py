@@ -104,7 +104,7 @@ async def _resolve_image_condition(
         pipeline_warnings.append(
             "Vision analysis failed; estimate used fallback condition inputs. "
             "If the image URL is from an MLS/CDN (e.g. media.crmls.org), re-host the photo on your "
-            "storage or set IMAGE_DOWNLOAD_REFERER to the MLS portal URL."
+            "storage or set RENOVATION_IMAGE_DOWNLOAD_REFERER to the MLS portal URL."
         )
         return _build_fallback_image_condition()
 

@@ -13,10 +13,7 @@ from app.engine.image_condition.services.image_filter import (
     FilteredImage,
     normalize_house_room_type,
 )
-from app.engine.image_condition.services.vision_image_payload import (
-    bytes_to_openai_vision_data_url,
-    image_url_to_openai_vision_data_url,
-)
+from app.engine.image_condition.services.vision_image_payload import bytes_to_openai_vision_data_url
 
 logger = logging.getLogger(__name__)
 
@@ -116,12 +113,15 @@ async def _prepare_vision_payloads(
     async def _one(index: int, image: FilteredImage) -> tuple[int, str | None]:
         async with sem:
             try:
-                if image.image_bytes:
-                    payload_url = await asyncio.to_thread(
-                        bytes_to_openai_vision_data_url, image.image_bytes
+                if not image.image_bytes:
+                    logger.warning(
+                        "condition-score: missing image bytes after filter (url=%s)",
+                        (image.image_url or "")[:120],
                     )
-                else:
-                    payload_url = await image_url_to_openai_vision_data_url(image.image_url)
+                    return index, None
+                payload_url = await asyncio.to_thread(
+                    bytes_to_openai_vision_data_url, image.image_bytes
+                )
                 return index, payload_url
             except Exception as exc:
                 logger.warning(

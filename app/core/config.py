@@ -112,10 +112,14 @@ class Settings(BaseSettings):
     RSMEANS_BASE_URL: str = ""
     LOCATION_INDEX_CACHE_TTL_SECONDS: int = Field(default=2_592_000, ge=60, le=31_536_000)
 
-    # Optional: Referer sent when downloading MLS/CDN image URLs (some return 403 without a browser-like Referer).
-    # Example: https://www.realty.com/ or the URL your CDN expects.
+    # Optional: Referer / proxy when downloading MLS/CDN listing photos (403 without portal Referer).
+    # Legacy globals apply to both flows when flow-specific vars are empty.
     IMAGE_DOWNLOAD_REFERER: str = ""
     IMAGE_DOWNLOAD_PROXY_TEMPLATE: str = ""
+    RENOVATION_IMAGE_DOWNLOAD_REFERER: str = ""
+    RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE: str = ""
+    CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER: str = ""
+    CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE: str = ""
     STORAGE_ENDPOINT_URL: str = ""
     STORAGE_REGION: str = "auto"
     STORAGE_BUCKET_NAME: str = ""
@@ -241,9 +245,17 @@ class Settings(BaseSettings):
             }
         raise ValueError("VALIDATION_RULE_OVERRIDES must be a dict or JSON object string")
 
-    @field_validator("IMAGE_DOWNLOAD_REFERER", mode="before")
+    @field_validator(
+        "IMAGE_DOWNLOAD_REFERER",
+        "IMAGE_DOWNLOAD_PROXY_TEMPLATE",
+        "RENOVATION_IMAGE_DOWNLOAD_REFERER",
+        "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE",
+        "CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER",
+        "CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE",
+        mode="before",
+    )
     @classmethod
-    def strip_image_download_referer(cls, v: str | None) -> str:
+    def strip_image_download_strings(cls, v: str | None) -> str:
         return (v or "").strip()
 
     @field_validator(

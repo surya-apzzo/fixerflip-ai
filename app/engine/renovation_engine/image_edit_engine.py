@@ -8,13 +8,15 @@ import math
 import re
 from io import BytesIO
 from pathlib import Path
-from urllib.parse import quote, urlparse
-
 import httpx
 from openai import AsyncOpenAI
 
 from app.core import redis_cache
 from app.core.config import settings
+from app.core.image_download import (
+    build_image_download_headers,
+    build_proxy_image_urls,
+)
 from app.schemas import ImageEditResult
 
 logger = logging.getLogger(__name__)
@@ -39,19 +41,6 @@ _NO_ISSUES_DETECTED_INSTRUCTION = (
     "Do not alter intact cabinets, counters, flooring, walls, ceilings, fixtures, "
     "appliances, furniture, or decor unless explicitly requested by the user."
 )
-
-_BROWSER_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/131.0.0.0 Safari/537.36"
-)
-
-# MLS/CDN hosts that reject generic server clients unless Referer matches the portal.
-_MLS_HOST_REFERERS: dict[str, str] = {
-    "crmls.org": "https://www.crmls.org/",
-    "mlslistings.com": "https://www.mlslistings.com/",
-    "realty.dev": "https://www.realty.dev/",
-    "cotality.com": "https://www.cotality.com/",
-}
 
 _OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS = 0.8
 
@@ -99,62 +88,6 @@ def _is_retryable_openai_exception(exc: Exception) -> bool:
 
 async def _wait_for_retry_backoff(attempt: int) -> None:
     await asyncio.sleep(_OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS * (2**attempt))
-
-
-def _referer_for_image_host(host: str) -> str | None:
-    normalized = (host or "").lower().removeprefix("www.")
-    if not normalized:
-        return None
-    for domain, referer in _MLS_HOST_REFERERS.items():
-        if normalized == domain or normalized.endswith(f".{domain}"):
-            return referer
-    return None
-
-
-def _build_image_download_headers(image_url: str) -> dict[str, str]:
-    headers: dict[str, str] = {
-        "User-Agent": _BROWSER_USER_AGENT,
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.9",
-    }
-    override = (settings.IMAGE_DOWNLOAD_REFERER or "").strip()
-    parsed = urlparse(image_url)
-    if override:
-        headers["Referer"] = override
-    elif parsed.netloc:
-        mls_referer = _referer_for_image_host(parsed.netloc)
-        if mls_referer:
-            headers["Referer"] = mls_referer
-            headers["Origin"] = mls_referer.rstrip("/")
-        elif parsed.scheme:
-            headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
-    return headers
-
-
-def _build_proxy_image_urls(image_url: str) -> list[str]:
-    template = (settings.IMAGE_DOWNLOAD_PROXY_TEMPLATE or "").strip()
-    if not template:
-        return []
-    if "://" in image_url:
-        raw = image_url.split("://", 1)[1]
-    else:
-        raw = image_url
-    candidates: list[str] = []
-    placeholder_values = {
-        "url_no_scheme_encoded": (quote(raw, safe=""), quote(f"https://{raw}", safe="")),
-        "url_full_encoded": (quote(image_url, safe=""),),
-    }
-    for placeholder, encoded_values in placeholder_values.items():
-        token = "{" + placeholder + "}"
-        if token not in template:
-            continue
-        for encoded_value in encoded_values:
-            url = template.replace(token, encoded_value)
-            if url not in candidates:
-                candidates.append(url)
-    if not candidates and "{url_no_scheme_encoded}" not in template and "{url_full_encoded}" not in template:
-        candidates.append(template.replace("{url}", quote(image_url, safe="")))
-    return candidates
 
 
 _ELEMENT_HINTS = {
@@ -638,8 +571,8 @@ async def edit_property_image_from_url(
         logger.warning("Source image download failed for edit (url=%s): %s", image_url, exc)
         raise ValueError(
             "Image URL could not be downloaded for structure-preserving edit. "
-            "Check that the URL is public/reachable, or configure IMAGE_DOWNLOAD_REFERER / "
-            "IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
+            "Check that the URL is public/reachable, or configure RENOVATION_IMAGE_DOWNLOAD_REFERER / "
+            "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
         ) from exc
 
     image_files: list[tuple[str, bytes, str]] = [
@@ -656,8 +589,8 @@ async def edit_property_image_from_url(
             logger.warning("Reference image download failed for edit (url=%s): %s", ref_url, exc)
             raise ValueError(
                 "Reference image URL could not be downloaded. "
-                "Check that the URL is public/reachable, or configure IMAGE_DOWNLOAD_REFERER / "
-                "IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
+                "Check that the URL is public/reachable, or configure RENOVATION_IMAGE_DOWNLOAD_REFERER / "
+                "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
             ) from exc
 
     reference_attached = len(image_files) > 1
@@ -750,18 +683,23 @@ async def _download_source_image(image_url: str) -> tuple[bytes, str]:
 
     try:
         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(image_url, headers=_build_image_download_headers(image_url))
+            response = await client.get(
+                image_url, headers=build_image_download_headers(image_url, flow="renovation")
+            )
             response.raise_for_status()
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else "unknown"
-        proxy_urls = _build_proxy_image_urls(image_url)
+        proxy_urls = build_proxy_image_urls(image_url, flow="renovation")
         if proxy_urls and status in (401, 403):
             try:
                 last_proxy_exc: Exception | None = None
                 for proxy_url in proxy_urls:
                     try:
                         async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-                            response = await client.get(proxy_url, headers={"User-Agent": _BROWSER_USER_AGENT})
+                            response = await client.get(
+                                proxy_url,
+                                headers=build_image_download_headers(image_url, flow="renovation"),
+                            )
                             response.raise_for_status()
                         break
                     except Exception as proxy_exc:
@@ -776,7 +714,8 @@ async def _download_source_image(image_url: str) -> tuple[bytes, str]:
         else:
             raise ValueError(
                 f"Image URL could not be downloaded (HTTP {status}). "
-                "Some CDNs block non-browser clients; configure IMAGE_DOWNLOAD_REFERER or IMAGE_DOWNLOAD_PROXY_TEMPLATE."
+                "Some CDNs block non-browser clients; configure RENOVATION_IMAGE_DOWNLOAD_REFERER "
+                "or RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE."
             ) from exc
     except httpx.HTTPError as exc:
         raise ValueError(
@@ -804,7 +743,7 @@ async def image_url_as_openai_vision_payload(image_url: str) -> str:
     Prefer a data URL for OpenAI vision so their servers do not fetch the URL.
 
     Presigned object-storage URLs often time out from OpenAI (400 invalid_request_error).
-    MLS/CDN URLs that return 403 must be re-hosted or configured via IMAGE_DOWNLOAD_REFERER;
+    MLS/CDN URLs that return 403 must be re-hosted or configured via RENOVATION_IMAGE_DOWNLOAD_REFERER;
     we do not pass the raw URL through (OpenAI would hit the same block).
     """
     url = (image_url or "").strip()

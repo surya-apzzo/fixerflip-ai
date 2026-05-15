@@ -5,10 +5,9 @@ import logging
 import re
 from dataclasses import dataclass
 
-import httpx
 from PIL import Image
 
-from app.engine.renovation_engine.image_edit_engine import _build_image_download_headers
+from app.core.image_download import download_listing_image_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -22,14 +21,7 @@ HOUSE_ROOM_LABELS: tuple[str, ...] = (
     "exterior front of house",
 )
 
-ROOM_WEIGHTS: dict[str, float] = {
-    "kitchen interior": 0.35,
-    "bathroom interior": 0.25,
-    "living room interior": 0.15,
-    "bedroom interior": 0.1,
-    "basement interior": 0.1,
-    "exterior front of house": 0.05,
-}
+_HOUSE_ROOM_TYPES = frozenset(HOUSE_ROOM_LABELS)
 
 # Non-property / non-house images — never used for condition score.
 NON_PROPERTY_LABELS: frozenset[str] = frozenset(
@@ -54,7 +46,7 @@ ALL_LABELS = [*HOUSE_ROOM_LABELS, *sorted(NON_PROPERTY_LABELS)]
 HOUSE_LABEL_INDICES = [ALL_LABELS.index(label) for label in HOUSE_ROOM_LABELS]
 NON_PROPERTY_LABEL_INDICES = {ALL_LABELS.index(label) for label in NON_PROPERTY_LABELS}
 
-# Vision prompt uses short names; CLIP + weights use long labels.
+# Vision prompt uses short names; map to canonical CLIP house labels.
 _VISION_ROOM_TYPE_ALIASES: dict[str, str] = {
     "kitchen": "kitchen interior",
     "bathroom": "bathroom interior",
@@ -73,14 +65,14 @@ _VISION_ROOM_TYPE_ALIASES: dict[str, str] = {
 
 
 def normalize_house_room_type(raw: str, *, clip_fallback: str = "") -> str | None:
-    """Map vision/CLIP labels to canonical ``ROOM_WEIGHTS`` keys."""
+    """Map vision/CLIP labels to canonical house room types."""
     text = re.sub(r"\s+", " ", (raw or "").strip().lower()).replace("_", " ")
-    if text in ROOM_WEIGHTS:
+    if text in _HOUSE_ROOM_TYPES:
         return text
     if text in _VISION_ROOM_TYPE_ALIASES:
         return _VISION_ROOM_TYPE_ALIASES[text]
     clip = re.sub(r"\s+", " ", (clip_fallback or "").strip().lower())
-    if clip in ROOM_WEIGHTS:
+    if clip in _HOUSE_ROOM_TYPES:
         return clip
     return None
 
@@ -96,7 +88,6 @@ class FilteredImage:
     image_url: str
     room_type: str
     confidence: float
-    weight: float
     image_bytes: bytes | None = None
 
 
@@ -161,17 +152,6 @@ def _is_non_property_image(probs) -> bool:
     return best_idx in NON_PROPERTY_LABEL_INDICES
 
 
-def _download_image_bytes(image_url: str) -> bytes | None:
-    try:
-        headers = _build_image_download_headers(image_url)
-        response = httpx.get(image_url, timeout=12.0, follow_redirects=True, headers=headers)
-        response.raise_for_status()
-        return response.content
-    except Exception as exc:
-        logger.warning("Skipping image download for URL %s: %s", image_url, exc)
-        return None
-
-
 def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | None:
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
@@ -185,7 +165,6 @@ def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | 
                 image_url=source,
                 room_type="unknown",
                 confidence=0.5,
-                weight=0.1,
                 image_bytes=image_bytes,
             )
         return None
@@ -208,7 +187,6 @@ def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | 
             image_url=source,
             room_type=room_type,
             confidence=confidence,
-            weight=ROOM_WEIGHTS[room_type],
             image_bytes=image_bytes,
         )
     except Exception as exc:
@@ -216,41 +194,61 @@ def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | 
         return None
 
 
-def classify_and_filter_inputs(
-    items: list[tuple[str | None, bytes | None]],
-) -> dict[str, object]:
+def deduplicate_filtered_by_room_type(
+    images: list[FilteredImage],
+) -> tuple[list[FilteredImage], int]:
     """
-    Filter listing photos. Each item is (optional_url, optional_bytes).
+    Keep one photo per ``room_type`` (highest CLIP confidence) before vision scoring.
 
-    When bytes are provided (client/base64 path), the server does not download the URL.
+    Example: three ``bedroom interior`` URLs after filter → one bedroom is sent to OpenAI.
     """
-    if not items:
-        return {"selected": [], "discarded_count": 0, "total_input": 0}
+    if not images:
+        return [], 0
+
+    best_by_room: dict[str, FilteredImage] = {}
+    for img in images:
+        room = (img.room_type or "unknown").strip() or "unknown"
+        prev = best_by_room.get(room)
+        if prev is None or float(img.confidence) > float(prev.confidence):
+            best_by_room[room] = img
+
+    label_order = {label: index for index, label in enumerate(HOUSE_ROOM_LABELS)}
+    unique = sorted(
+        best_by_room.values(),
+        key=lambda row: (label_order.get(row.room_type, 999), -float(row.confidence)),
+    )
+    skipped = len(images) - len(unique)
+    if skipped:
+        logger.info(
+            "condition-score dedupe: %s filtered image(s) -> %s unique room type(s) (%s duplicate room photos skipped)",
+            len(images),
+            len(unique),
+            skipped,
+        )
+    return unique, skipped
+
+
+def classify_and_filter_urls(image_urls: list[str]) -> dict[str, object]:
+    """Download each URL, run CLIP, and keep house/property photos only."""
+    if not image_urls:
+        return {"selected": [], "discarded_count": 0, "total_input": 0, "download_failures": 0}
 
     selected: list[FilteredImage] = []
     discarded_count = 0
     download_failures = 0
 
-    for url, image_bytes in items:
-        source = (url or "").strip() or "embedded-image"
-        if image_bytes is not None:
-            row = _clip_classify_bytes(image_bytes, source=source)
-            if row is None:
-                discarded_count += 1
-            else:
-                selected.append(row)
-            continue
-
-        if not (url or "").strip():
+    for url in image_urls:
+        cleaned = (url or "").strip()
+        if not cleaned:
             discarded_count += 1
             continue
 
-        downloaded = _download_image_bytes(url.strip())
+        downloaded = download_listing_image_bytes(cleaned, flow="condition_score")
         if downloaded is None:
             download_failures += 1
             discarded_count += 1
             continue
-        row = _clip_classify_bytes(downloaded, source=url.strip())
+        row = _clip_classify_bytes(downloaded, source=cleaned)
         if row is None:
             discarded_count += 1
         else:
@@ -259,19 +257,7 @@ def classify_and_filter_inputs(
     return {
         "selected": selected,
         "discarded_count": discarded_count,
-        "total_input": len(items),
+        "total_input": len(image_urls),
         "download_failures": download_failures,
     }
-
-
-def classify_and_filter(image_urls: list[str]) -> dict[str, object]:
-    """
-    Keep only house/property photos (kitchen, bath, living areas, basement, front exterior).
-
-    Floor plans, aerials, pools, street views, maps, and similar images are discarded
-    and never sent to vision scoring.
-    """
-    clean_urls = [url.strip() for url in image_urls if url and url.strip()]
-    items = [(url, None) for url in clean_urls]
-    return classify_and_filter_inputs(items)
 

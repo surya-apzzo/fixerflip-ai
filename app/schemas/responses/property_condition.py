@@ -20,7 +20,20 @@ class ConditionScoreResponse(BaseModel):
     positive_signals: list[str] = Field(default_factory=list)
     caution_signals: list[str] = Field(default_factory=list)
     red_flags: list[str] = Field(default_factory=list)
-    images_analyzed: int = Field(ge=0)
-    images_discarded: int = Field(ge=0)
+    images_analyzed: int = Field(
+        ge=0,
+        description="Unique room-type photos sent to vision (after dedupe).",
+    )
+    images_discarded: int = Field(ge=0, description="Removed by CLIP/heuristics or failed download.")
+    images_after_filter: int = Field(
+        default=0,
+        ge=0,
+        description="House photos kept after filter, before dedupe by room_type.",
+    )
+    images_deduplicated: int = Field(
+        default=0,
+        ge=0,
+        description="Extra photos skipped because the same room_type was already represented.",
+    )
     cost_usd: float = Field(ge=0)
 
