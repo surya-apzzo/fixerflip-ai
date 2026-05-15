@@ -34,9 +34,26 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
     selected = filter_result["selected"]
     total_input = int(filter_result.get("total_input", len(filter_items)))
     discarded_count = int(filter_result.get("discarded_count", 0))
+    download_failures = int(filter_result.get("download_failures", 0))
     uses_embedded_bytes = any(b is not None for _u, b in filter_items)
 
     if total_input > 0 and not selected:
+        if not uses_embedded_bytes and download_failures >= total_input:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "IMAGE_DOWNLOAD_FAILED",
+                    "message": (
+                        "Could not download any listing photo URLs (often HTTP 403 from Cotality/CRMLS). "
+                        "Send images[].base64 from your app, or re-host photos on S3 and pass those URLs."
+                    ),
+                    "meta": {
+                        "total_input": total_input,
+                        "images_discarded": discarded_count,
+                        "download_failures": download_failures,
+                    },
+                },
+            )
         raise HTTPException(
             status_code=422,
             detail={
@@ -46,13 +63,15 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                         "field": "images" if uses_embedded_bytes else "image_urls",
                         "message": (
                             "No usable house/property photos found after filtering. "
-                            "Floor plans, aerials, pools, and street views are excluded."
+                            "Floor plans, aerials, pools, and street views are excluded, or CLIP could not "
+                            "classify the photos as interior/exterior house shots."
                         ),
                     }
                 ],
                 "meta": {
                     "total_input": total_input,
                     "images_discarded": discarded_count,
+                    "download_failures": download_failures,
                 },
             },
         )

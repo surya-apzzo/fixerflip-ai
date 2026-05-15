@@ -229,6 +229,7 @@ def classify_and_filter_inputs(
 
     selected: list[FilteredImage] = []
     discarded_count = 0
+    download_failures = 0
 
     for url, image_bytes in items:
         source = (url or "").strip() or "embedded-image"
@@ -246,6 +247,7 @@ def classify_and_filter_inputs(
 
         downloaded = _download_image_bytes(url.strip())
         if downloaded is None:
+            download_failures += 1
             discarded_count += 1
             continue
         row = _clip_classify_bytes(downloaded, source=url.strip())
@@ -258,6 +260,7 @@ def classify_and_filter_inputs(
         "selected": selected,
         "discarded_count": discarded_count,
         "total_input": len(items),
+        "download_failures": download_failures,
     }
 
 
