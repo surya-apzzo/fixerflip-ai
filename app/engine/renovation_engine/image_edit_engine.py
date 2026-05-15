@@ -129,15 +129,31 @@ def _build_proxy_image_urls(image_url: str) -> list[str]:
 
 _ELEMENT_HINTS = {
     "flooring": "floors and floor finish",
-    "paint": "wall and ceiling paint finish",
+    "paint": "interior wall paint or exterior siding/trim/facade paint",
     "lighting": "light fixtures and lighting look",
     "furniture": "furniture style and condition",
-    "roof": "roof shingles and roofline finish",
+    "ceiling": "interior ceiling surface, texture, and finish",
     "cabinet": "kitchen or bathroom cabinetry fronts",
     "window": "window frames and glass panes",
     "stair": "staircase steps, railing, and finish",
     "door": "interior and exterior doors",
+    "roof": "roof shingles and roofline finish",
+    "siding": "exterior siding, cladding, and facade boards",
+    "landscaping": "planting beds, shrubs, trees, lawn, and yard landscape",
+    "driveway": "driveway surface and approach paving",
+    "fence": "perimeter fencing and gates",
 }
+
+_EXTERIOR_FLOORING_HINT = (
+    "exterior deck, patio, porch boards, pavers, or other outdoor walkable surface finish"
+)
+_INTERIOR_FLOORING_HINT = "interior floors and floor finish"
+
+_EXTERIOR_FLOORING_ACTION = (
+    "Exterior flooring directive: update only visible outdoor walkable surfaces (deck, patio, porch flooring, "
+    "pavers, or exterior tile). Preserve the house walls, roof, windows, doors, driveway, fence, and landscaping "
+    "unless those are explicitly selected too."
+)
 
 _ELEMENT_ACTION_HINTS = {
     "flooring": (
@@ -146,7 +162,8 @@ _ELEMENT_ACTION_HINTS = {
         "identical, and do not alter cabinets, counters, walls, ceiling, appliances, furniture, or decor."
     ),
     "paint": (
-        "Paint directive: visibly update only the requested wall/ceiling paint surfaces while keeping all other finishes unchanged."
+        "Paint directive: for interiors, update only the requested wall/ceiling paint surfaces. "
+        "For exteriors, update only visible siding/trim/shutter/body paint while keeping other building elements coherent."
     ),
     "lighting": (
         "Lighting directive: update only visible light fixtures and lighting tone/intensity while preserving all cabinetry, "
@@ -155,6 +172,10 @@ _ELEMENT_ACTION_HINTS = {
     "furniture": (
         "Furniture directive: update only furniture look/style/finish of existing furniture in place. "
         "Do not add extra furniture pieces and do not alter architecture, cabinetry, walls, or flooring."
+    ),
+    "ceiling": (
+        "Ceiling directive: update only the visible ceiling surface (texture, color, or finish). "
+        "Do not alter walls, floors, cabinets, lighting fixtures, or room geometry unless explicitly requested."
     ),
     "roof": (
         "Roof directive: visibly update the roof covering material and color. Preserve the structural roofline and the rest of the exterior unchanged."
@@ -171,6 +192,22 @@ _ELEMENT_ACTION_HINTS = {
     "door": (
         "Door directive: update the style, color, or material of visible doors. Do not alter the surrounding walls or structural openings."
     ),
+    "siding": (
+        "Siding directive: visibly update exterior wall cladding/siding material, color, or pattern. "
+        "Preserve roofline, windows, doors, and yard layout unless those are explicitly selected too."
+    ),
+    "landscaping": (
+        "Landscaping directive: update planting beds, shrubs, small trees, lawn, and decorative landscape visible in frame. "
+        "Do not replace the entire house structure; keep the home footprint and hardscape unless explicitly requested."
+    ),
+    "driveway": (
+        "Driveway directive: update only the visible driveway or approach paving (material, color, condition). "
+        "Preserve the house, yard, and fencing unless explicitly selected."
+    ),
+    "fence": (
+        "Fence directive: update only visible perimeter fencing or gates (material, color, style). "
+        "Preserve the house, roof, landscaping, and driveway unless explicitly selected."
+    ),
 }
 
 _STRICT_DAMAGE_REPAIR_ONLY_RULES = (
@@ -185,6 +222,22 @@ _SURFACE_CONTINUITY_RULES = (
     "surface section with continuous texture/color so it does not look patchy, half-painted, or unfinished. "
     "Blend repaired boundaries naturally into adjacent intact areas."
 )
+
+
+def _is_exterior_renovation(type_of_renovation: str) -> bool:
+    return str(type_of_renovation or "").strip().lower() == "exterior"
+
+
+def _element_description(element: str, *, exterior: bool) -> str:
+    if element == "flooring":
+        return _EXTERIOR_FLOORING_HINT if exterior else _INTERIOR_FLOORING_HINT
+    return _ELEMENT_HINTS.get(element, element)
+
+
+def _element_action_hint(element: str, *, exterior: bool) -> str | None:
+    if element == "flooring" and exterior:
+        return _EXTERIOR_FLOORING_ACTION
+    return _ELEMENT_ACTION_HINTS.get(element)
 
 
 def _is_generic_renovate_request(text: str) -> bool:
@@ -248,31 +301,49 @@ def _append_selected_element_directives(
     visual_type: str,
     elements: list[str],
     element_descriptions: list[str],
+    type_of_renovation: str,
 ) -> None:
     if visual_type != "select_elements_to_renovate":
         return
+    exterior = _is_exterior_renovation(type_of_renovation)
     if element_descriptions:
         directive_lines.append(
             "Selected elements to renovate: " + ", ".join(element_descriptions) + "."
         )
         directive_lines.append("Apply visible changes only to selected elements.")
-        directive_lines.append(
-            "Do NOT modify unselected elements (especially wall color, ceiling, flooring, cabinets, counters, appliances) unless explicitly selected."
-        )
-        directive_lines.append(
-            "At least one visible change must be made for each selected element while preserving the original room layout."
-        )
+        if exterior:
+            directive_lines.append(
+                "Do NOT modify unselected exterior features (roof, windows, doors, siding, trim paint, "
+                "deck/patio flooring, landscaping, driveway, fence) unless explicitly selected or required by the user instruction."
+            )
+            directive_lines.append(
+                "At least one visible change must be made for each selected element while preserving "
+                "the same building footprint, camera angle, and overall composition."
+            )
+        else:
+            directive_lines.append(
+                "Do NOT modify unselected elements (especially wall color, ceiling, flooring, cabinets, counters, appliances) unless explicitly selected."
+            )
+            directive_lines.append(
+                "At least one visible change must be made for each selected element while preserving the original room layout."
+            )
         for element in elements:
-            action_hint = _ELEMENT_ACTION_HINTS.get(element)
+            action_hint = _element_action_hint(element, exterior=exterior)
             if action_hint:
                 directive_lines.append(action_hint)
         return
     directive_lines.append(
         "No specific elements were selected. Use conservative damage-repair mode only."
     )
-    directive_lines.append(
-        "Keep all intact property features unchanged (especially cabinets, counters, flooring, walls, ceilings, fixtures, appliances, furniture, and decor)."
-    )
+    if exterior:
+        directive_lines.append(
+            "Keep all intact exterior features unchanged (roof, siding, windows, doors, trim, deck/patio flooring, driveway, fence, landscaping) "
+            "unless damage repair requires local fixes."
+        )
+    else:
+        directive_lines.append(
+            "Keep all intact property features unchanged (especially cabinets, counters, flooring, walls, ceilings, fixtures, appliances, furniture, and decor)."
+        )
 
 
 def _append_reference_directives(
@@ -292,9 +363,26 @@ def _append_reference_directives(
 
 def _append_user_note_directive(directive_lines: list[str], *, base_instruction: str) -> None:
     if base_instruction:
-        directive_lines.append("User instruction (highest priority): " + base_instruction)
-    else:
-        directive_lines.append("User note: " + _DEFAULT_IMAGE_EDIT_INSTRUCTION)
+        return
+    directive_lines.append("User note: " + _DEFAULT_IMAGE_EDIT_INSTRUCTION)
+
+
+def _append_authoritative_user_edit_block(directive_lines: list[str], *, base_instruction: str) -> None:
+    """
+    Put the client's words near the top of the directive so images.edit attends to them before
+    long generic repair text. End of build_instruction_for_edit adds a short reminder.
+    """
+    directive_lines.extend(
+        [
+            "=== USER IMAGE EDIT REQUEST (AUTHORITATIVE) ===",
+            "User instruction: " + base_instruction,
+            (
+                "Authority rule: If the user names specific colors, materials, surfaces, fixtures, rooms, "
+                "or scope, implement those visibly. Sections below about conservative repair apply mainly to "
+                "areas the user did not address; they must not cancel explicit user requests."
+            ),
+        ]
+    )
 
 
 def build_instruction_for_edit(
@@ -310,7 +398,8 @@ def build_instruction_for_edit(
 ) -> str:
     base_instruction = (user_inputs or "").strip()
     elements = [e.strip().lower() for e in (renovation_elements or []) if e and e.strip()]
-    element_descriptions = [_ELEMENT_HINTS.get(e, e) for e in elements]
+    exterior = _is_exterior_renovation(type_of_renovation)
+    element_descriptions = [_element_description(e, exterior=exterior) for e in elements]
 
     directive_lines = [
         "Full-scene preservation: the output must include the SAME field of view as the source—every pixel "
@@ -326,6 +415,9 @@ def build_instruction_for_edit(
         f"Desired quality level: {desired_quality_level}",
         f"Visual scope preset: {visual_scope_hint}",
     ]
+
+    if base_instruction:
+        _append_authoritative_user_edit_block(directive_lines, base_instruction=base_instruction)
 
     issues = [i.strip() for i in (detected_issues or []) if i and i.strip()]
     if issues:
@@ -344,6 +436,7 @@ def build_instruction_for_edit(
         visual_type=visual_type,
         elements=elements,
         element_descriptions=element_descriptions,
+        type_of_renovation=type_of_renovation,
     )
     _append_reference_directives(
         directive_lines,
@@ -351,6 +444,11 @@ def build_instruction_for_edit(
         reference_image_url=reference_image_url,
     )
     _append_user_note_directive(directive_lines, base_instruction=base_instruction)
+    if base_instruction:
+        directive_lines.append(
+            "Final check: honor the USER IMAGE EDIT REQUEST block for every explicit color, finish, "
+            "fixture, or decor change the user named."
+        )
 
     return "\n".join(directive_lines)
 

@@ -16,3 +16,5 @@ For every mode, keep these invariants:
 - Do not add text, logos, watermarks, borders, or UI overlays.
 
 Output: return only the edited image.
+
+If the request text includes a "USER IMAGE EDIT REQUEST" section, treat that section as controlling any explicit colors, materials, or scope the user named.

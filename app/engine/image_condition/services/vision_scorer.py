@@ -9,7 +9,7 @@ from openai import AsyncOpenAI
 
 from app.core.config import settings
 from app.engine.image_condition.services.image_filter import FilteredImage
-from app.engine.renovation_engine.image_edit_engine import image_url_as_openai_vision_payload
+from app.engine.image_condition.services.vision_image_payload import image_url_to_openai_vision_data_url
 
 logger = logging.getLogger(__name__)
 
@@ -69,9 +69,43 @@ async def score_from_images(selected_images: list[FilteredImage]) -> dict[str, A
 
     for chunk in _chunk_images(selected_images):
         content: list[dict[str, Any]] = [{"type": "input_text", "text": vision_prompt}]
-        for img in chunk:
-            payload_url = await image_url_as_openai_vision_payload(img.image_url)
+        chunk_index_by_image_slot: list[int] = []
+        for i, img in enumerate(chunk):
+            try:
+                payload_url = await image_url_to_openai_vision_data_url(img.image_url)
+            except Exception as exc:
+                logger.warning(
+                    "condition-score: skipping image (cannot prepare for vision): idx=%s url=%s err=%s",
+                    i,
+                    (img.image_url or "")[:120],
+                    exc,
+                )
+                continue
+            if not (payload_url or "").strip():
+                logger.warning(
+                    "condition-score: skipping image (empty payload): idx=%s",
+                    i,
+                )
+                continue
             content.append({"type": "input_image", "image_url": payload_url})
+            chunk_index_by_image_slot.append(i)
+
+        if len(content) <= 1:
+            for i, img in enumerate(chunk):
+                room_scores.append(
+                    {
+                        "room_type": img.room_type or "unknown",
+                        "score": 50.0,
+                        "weight": float(img.weight),
+                        "signals": (
+                            ["Image could not be loaded or decoded for scoring."]
+                            if i not in chunk_index_by_image_slot
+                            else []
+                        ),
+                        "red_flags": [],
+                    }
+                )
+            continue
 
         response = await client.responses.create(
             model=settings.default_openai_vision_model,
@@ -87,31 +121,52 @@ async def score_from_images(selected_images: list[FilteredImage]) -> dict[str, A
             out_tokens = float(getattr(usage, "output_tokens", 0) or 0)
             total_cost += ((in_tokens / 1_000_000) * 0.15) + ((out_tokens / 1_000_000) * 0.60)
 
-        for idx, result in enumerate(parsed_chunk):
-            if idx >= len(chunk):
+        filled: list[dict[str, Any] | None] = [None] * len(chunk)
+        for slot_idx, result in enumerate(parsed_chunk):
+            if slot_idx >= len(chunk_index_by_image_slot):
                 break
-            score = float(result.get("condition_score", 50))
+            chunk_idx = chunk_index_by_image_slot[slot_idx]
+            if not isinstance(result, dict):
+                result = {}
+            try:
+                score = float(result.get("condition_score", 50))
+            except (TypeError, ValueError):
+                score = 50.0
+            filled[chunk_idx] = {
+                "room_type": str(result.get("room_type", chunk[chunk_idx].room_type or "unknown")),
+                "score": max(0.0, min(100.0, score)),
+                "weight": float(chunk[chunk_idx].weight),
+                "signals": [str(s) for s in result.get("signals", []) if str(s).strip()],
+                "red_flags": [str(s) for s in result.get("red_flags", []) if str(s).strip()],
+            }
+
+        slot_by_chunk_idx = {cidx: slot for slot, cidx in enumerate(chunk_index_by_image_slot)}
+        for i, img in enumerate(chunk):
+            if filled[i] is not None:
+                room_scores.append(filled[i])
+                continue
+            if i not in slot_by_chunk_idx:
+                signals = ["Image could not be loaded or decoded for scoring."]
+            elif slot_by_chunk_idx[i] >= len(parsed_chunk):
+                signals = ["Vision response missing this image; neutral score used."]
+            else:
+                signals = []
             room_scores.append(
                 {
-                    "room_type": str(result.get("room_type", chunk[idx].room_type or "unknown")),
-                    "score": max(0.0, min(100.0, score)),
-                    "weight": float(chunk[idx].weight),
-                    "signals": [str(s) for s in result.get("signals", []) if str(s).strip()],
-                    "red_flags": [str(s) for s in result.get("red_flags", []) if str(s).strip()],
+                    "room_type": img.room_type or "unknown",
+                    "score": 50.0,
+                    "weight": float(img.weight),
+                    "signals": signals,
+                    "red_flags": [],
                 }
             )
 
-        if len(parsed_chunk) < len(chunk):
-            for img in chunk[len(parsed_chunk) :]:
-                room_scores.append(
-                    {
-                        "room_type": img.room_type or "unknown",
-                        "score": 50.0,
-                        "weight": float(img.weight),
-                        "signals": [],
-                        "red_flags": [],
-                    }
-                )
+        if len(parsed_chunk) < len(chunk_index_by_image_slot):
+            logger.warning(
+                "condition-score vision: model returned %s rows for %s images sent; padding with defaults.",
+                len(parsed_chunk),
+                len(chunk_index_by_image_slot),
+            )
 
     return {"room_scores": room_scores, "cost_usd": round(total_cost, 6)}
 

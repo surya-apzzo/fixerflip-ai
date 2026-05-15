@@ -23,18 +23,64 @@ def _contains_multiple_http_urls(value: str) -> bool:
     if not s:
         return False
     return len(re.findall(r"https?://", s, flags=re.IGNORECASE)) > 1
-_ALLOWED_RENOVATION_ELEMENTS = {
-    "flooring",
-    "paint",
-    "lighting",
-    "furniture",
-    "roof",
-    "cabinet",
-    "window",
-    "stair",
-    "door",
-}
-_MIN_RENOVATION_CONTEXT_TOKENS = 1
+_ALLOWED_RENOVATION_ELEMENTS_INTERIOR: frozenset[str] = frozenset(
+    {
+        "flooring",
+        "paint",
+        "lighting",
+        "furniture",
+        "ceiling",   # renamed from "roof" for clarity
+        "cabinet",
+        "window",
+        "stair",
+        "door",
+    }
+)
+
+_ALLOWED_RENOVATION_ELEMENTS_EXTERIOR: frozenset[str] = frozenset(
+    {
+        "paint",
+        "siding",
+        "window",
+        "door",
+        "landscaping",  # covers yard too, removed redundant "yard"
+        "driveway",
+        "fence",
+        "flooring",
+    }
+)
+
+
+def _normalized_renovation_type(value: object) -> str:
+    return str(value or "").strip().lower() or "interior"
+
+
+def _renovation_element_scope(type_of_renovation: object) -> str:
+    """Interior vs exterior drives which renovation_elements values are valid."""
+    return "exterior" if _normalized_renovation_type(type_of_renovation) == "exterior" else "interior"
+
+
+def _allowed_renovation_elements(renovation_type: str) -> frozenset[str]:
+    if renovation_type == "exterior":
+        return _ALLOWED_RENOVATION_ELEMENTS_EXTERIOR
+    return _ALLOWED_RENOVATION_ELEMENTS_INTERIOR
+
+
+def _canonical_renovation_element(raw: str, *, renovation_type: str) -> str:
+    """Apply aliases and interior/exterior-specific remaps (e.g. interior roof -> ceiling)."""
+    key = (raw or "").strip().lower()
+    if not key:
+        return ""
+    canonical = _RENOVATION_ELEMENT_ALIASES.get(key, key)
+    if _renovation_element_scope(renovation_type) == "interior":
+        if canonical == "roof":
+            return "ceiling"
+        return canonical
+    if canonical == "ceiling":
+        return "roof"
+    return canonical
+
+
 _RENOVATION_ELEMENT_ALIASES = {
     "floor": "flooring",
     "floors": "flooring",
@@ -54,42 +100,80 @@ _RENOVATION_ELEMENT_ALIASES = {
     "staircase": "stair",
     "backsplash": "cabinet",
     "doors": "door",
+    "paints": "paint",
+    "exterior paint": "paint",
+    "facade paint": "paint",
+    "sidings": "siding",
+    "cladding": "siding",
+    "landscape": "landscaping",
+    "garden": "landscaping",
+    "lawns": "landscaping",
+    "lawn": "landscaping",
+    "yards": "landscaping",
+    "yard": "landscaping",
+    "curb appeal": "landscaping",
+    "popcorn ceiling": "ceiling",
+    "ceilings": "ceiling",
+    "driveways": "driveway",
+    "fencing": "fence",
+    "fences": "fence",
+    "deck": "flooring",
+    "decks": "flooring",
+    "patio": "flooring",
+    "patios": "flooring",
+    "porch": "flooring",
+    "pavers": "flooring",
+    "paver": "flooring",
+}
 
-}
-_RENOVATION_DOMAIN_KEYWORDS = {
-    "home",
-    "house",
-    "property",
-    "room",
-    "interior",
-    "exterior",
-    "renovate",
-    "renovation",
-    "remodel",
-    "repair",
-    "upgrade",
-    "replace",
-    "refinish",
-    "paint",
-    "wall",
-    "ceiling",
-    "floor",
-    "flooring",
-    "tile",
-    "lighting",
-    "light",
-    "fixture",
-    "furniture",
-    "kitchen",
-    "bathroom",
-    "cabinet",
-    "counter",
-    "countertop",
-    "backsplash",
-    "door",
-    "window",
-    "stair",
-}
+# user_inputs: free-form add/remove/change is OK, but content must stay on
+# residential / house / property work (word boundaries; multi-word phrases first).
+_HOME_SCOPE_PHRASES: tuple[str, ...] = tuple(
+    p.strip()
+    for p in (
+        "living room, family room, dining room, laundry room, mud room, powder room, "
+        "master bath, master bathroom, half bath, full bath, walk in closet, walk-in closet, "
+        "crown molding, water heater, air conditioning, dry wall, open concept, hot tub, home office"
+    )
+    .split(",")
+    if p.strip()
+)
+
+# One string → split; keeps residential keyword coverage without a huge literal set.
+_HOME_SCOPE_WORDS: frozenset[str] = frozenset(
+    """
+    home house housing household property residence residential dwelling
+    condo townhouse duplex triplex apartment flat bungalow cottage mansion homestead
+    lot yard curb driveway mailbox interior exterior indoor outdoor facade envelope
+    kitchen bathroom bath bedroom bedrooms room rooms loft den basement cellar attic crawlspace crawl
+    garage carport mudroom pantry closet closets foyer hallway hall landing stair stairs staircase railing
+    balcony terrace sunroom nursery office study
+    wall walls ceiling ceilings floor flooring subfloor tile tiles grout carpet hardwood linoleum vinyl laminate
+    paint primer trim molding baseboard wainscoting drywall plaster insulation stud studs framing beam joist rafter
+    shingle shingles gutter gutters downspout flashing skylight window windows door doors
+    cabinet cabinets cabinetry countertop countertops counter counters island backsplash
+    sink sinks faucet faucets tub bathtub shower toilet vanity mirror
+    lighting fixture fixtures chandelier sconce outlet outlets switch breaker wiring electrical plumbing pipes drain sewer
+    heater hvac furnace duct ducts ductwork ventilation boiler radiator fireplace chimney mantel
+    roof roofing siding brick stucco veneer porch deck patio fence fencing gate pool spa landscape landscaping furniture
+    renovate renovation remodel remodeling rehab repair repairs upgrade upgrades replace refinish restore refresh
+    modernize modernise gut demolish finishes layout
+    """.split()
+)
+_OUT_OF_HOME_SCOPE_PATTERN = re.compile(
+    r"\b(?:"
+    r"car|truck|suv|vehicle|automotive|boat|yacht|aircraft|airplane|helicopter|"
+    r"motorcycle|bicycle|scooter|phone|smartphone|laptop|computer|tablet|"
+    r"software|website|app"
+    r")\b",
+    re.IGNORECASE,
+)
+_HOME_SCOPE_PATTERN = re.compile(
+    r"\b(?:"
+    + "|".join(re.escape(w) for w in sorted(_HOME_SCOPE_WORDS, key=len, reverse=True))
+    + r")\b",
+    re.IGNORECASE,
+)
 
 
 class ValidationErrorItem(TypedDict):
@@ -115,7 +199,7 @@ class NumericValidationRule:
     max_inclusive: bool = True
 
 
-def _normalize_renovation_elements(value: object) -> list[str]:
+def _normalize_renovation_elements(value: object, *, renovation_type: str) -> list[str]:
     if value is None:
         return []
     if isinstance(value, str):
@@ -125,12 +209,12 @@ def _normalize_renovation_elements(value: object) -> list[str]:
     else:
         return []
 
+    allowed = _allowed_renovation_elements(renovation_type)
     seen: set[str] = set()
     output: list[str] = []
     for item in raw:
-        key = item.lower()
-        canonical = _RENOVATION_ELEMENT_ALIASES.get(key, key)
-        if canonical not in _ALLOWED_RENOVATION_ELEMENTS:
+        canonical = _canonical_renovation_element(item, renovation_type=renovation_type)
+        if canonical not in allowed:
             continue
         key = canonical
         if key in seen:
@@ -152,14 +236,15 @@ def _extract_raw_renovation_elements(value: object) -> list[str]:
     return []
 
 
-def _find_invalid_renovation_elements(value: object) -> list[str]:
+def _find_invalid_renovation_elements(value: object, *, renovation_type: str) -> list[str]:
     raw = _extract_raw_renovation_elements(value)
+    allowed = _allowed_renovation_elements(renovation_type)
     invalid: list[str] = []
     seen: set[str] = set()
     for item in raw:
         normalized = item.lower()
-        canonical = _RENOVATION_ELEMENT_ALIASES.get(normalized, normalized)
-        if canonical in _ALLOWED_RENOVATION_ELEMENTS:
+        canonical = _canonical_renovation_element(item, renovation_type=renovation_type)
+        if canonical in allowed:
             continue
         if normalized in seen:
             continue
@@ -216,17 +301,16 @@ def _normalize_optional_string(value: object, *, fallback: str = "") -> str:
     return normalized or fallback
 
 
-def _is_renovation_domain_instruction(text: str) -> bool:
+def _is_home_or_property_instruction(text: str) -> bool:
+    """Allow any wording; require residential/property scope, not vehicles/devices/etc."""
     lowered = (text or "").strip().lower()
     if not lowered:
         return True
-    token_hits = 0
-    for keyword in _RENOVATION_DOMAIN_KEYWORDS:
-        if keyword in lowered:
-            token_hits += 1
-            if token_hits >= _MIN_RENOVATION_CONTEXT_TOKENS:
-                return True
-    return False
+    if _OUT_OF_HOME_SCOPE_PATTERN.search(lowered):
+        return False
+    if any(p in lowered for p in _HOME_SCOPE_PHRASES):
+        return True
+    return bool(_HOME_SCOPE_PATTERN.search(lowered))
 
 
 def _append_error(errors: list[ValidationErrorItem], *, field: str, message: str) -> None:
@@ -450,20 +534,20 @@ def _validate_payload_values(
     if payload.image_url and _contains_multiple_http_urls(payload.image_url):
         _append_error(errors, field="image_url", message=_SINGLE_IMAGE_URL_MESSAGE)
     if invalid_renovation_elements:
-        allowed = ", ".join(sorted(_ALLOWED_RENOVATION_ELEMENTS))
+        allowed = ", ".join(sorted(_allowed_renovation_elements(_renovation_element_scope(payload.type_of_renovation))))
         invalid = ", ".join(invalid_renovation_elements)
         _append_error(
             errors,
             field="renovation_elements",
             message=f"Unsupported element(s): {invalid}. Allowed values: {allowed}.",
         )
-    if payload.user_inputs and not _is_renovation_domain_instruction(payload.user_inputs):
+    if payload.user_inputs and not _is_home_or_property_instruction(payload.user_inputs):
         _append_error(
             errors,
             field="user_inputs",
             message=(
-                "Instruction must be related to home renovation scope only "
-                "(e.g., flooring, paint, lighting, furniture, room updates)."
+                "Instructions must be about home, house, or residential property work only "
+                "(rooms, finishes, structure, yard, etc.). Vehicles, electronics, and unrelated topics are not supported."
             ),
         )
 
@@ -477,7 +561,12 @@ def _validate_payload_values(
 def validate_and_normalize_renovation_payload(
     payload: RenovationEstimateRequest,
 ) -> RenovationEstimateRequest:
-    invalid_renovation_elements = _find_invalid_renovation_elements(payload.renovation_elements)
+    type_stored = _normalize_optional_string(payload.type_of_renovation, fallback="interior")
+    renovation_type_for_elements = _renovation_element_scope(type_stored)
+    invalid_renovation_elements = _find_invalid_renovation_elements(
+        payload.renovation_elements,
+        renovation_type=renovation_type_for_elements,
+    )
     normalized = payload.model_copy(
         update={
             "image_url": _normalize_optional_string(payload.image_url),
@@ -487,17 +576,17 @@ def validate_and_normalize_renovation_payload(
             "property_type": _normalize_optional_string(payload.property_type, fallback="SFR"),
             "listing_description": _normalize_optional_string(payload.listing_description),
             "listing_status": _normalize_optional_string(payload.listing_status),
-            "type_of_renovation": _normalize_optional_string(
-                payload.type_of_renovation,
-                fallback="interior",
-            ),
+            "type_of_renovation": type_stored,
             "visual_type": _normalize_optional_string(
                 payload.visual_type,
                 fallback="select_elements_to_renovate",
             ),
             "reference_image_url": _normalize_optional_string(payload.reference_image_url),
             "desired_quality_level": _normalize_desired_quality_level(payload.desired_quality_level),
-            "renovation_elements": _normalize_renovation_elements(payload.renovation_elements),
+            "renovation_elements": _normalize_renovation_elements(
+                payload.renovation_elements,
+                renovation_type=renovation_type_for_elements,
+            ),
             "issues": _normalize_issue_list(payload.issues),
             "room_type": _normalize_optional_string(payload.room_type, fallback="unknown"),
             "user_inputs": _normalize_optional_string(payload.user_inputs),

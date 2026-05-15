@@ -213,12 +213,12 @@ def estimate_renovation_cost(
             merged_items.extend(issue_work_items)
         suggested_work_items = _deduplicate_work_items(merged_items)
     elif data.issues and user_work_items:
-        # For damaged properties, user-requested upgrades are additive and must not hide remediation scope.
-        suggested_work_items = _deduplicate_work_items([*issue_work_items, *user_work_items])
+        # User intent before issue heuristics so labels like "paint renovation" beat bare "paint".
+        suggested_work_items = _deduplicate_work_items([*user_work_items, *issue_work_items])
     elif user_work_items:
-        suggested_work_items = user_work_items
+        suggested_work_items = _deduplicate_work_items(user_work_items)
     else:
-        suggested_work_items = issue_work_items
+        suggested_work_items = _deduplicate_work_items(issue_work_items)
     impacted_elements, impacted_element_details = _build_impacted_element_outputs(
         data.room_type,
         data.issues,
@@ -284,11 +284,16 @@ _ELEMENT_SELECTION_SCOPE_PHRASES: dict[str, str] = {
     "paint": "new paint",
     "lighting": "electrical upgrade",
     "furniture": "furniture refresh",
-    "roof": "new roof",
+    "ceiling": "ceiling refresh",
     "cabinet": "new cabinets",
     "window": "new windows",
     "stair": "staircase upgrade",
     "door": "new doors",
+    "roof": "new roof",
+    "siding": "new siding",
+    "landscaping": "new landscaping",
+    "driveway": "driveway improvements",
+    "fence": "fence improvements",
 }
 
 _SELECTED_ELEMENT_TO_COST_CATEGORY: dict[str, str] = {
@@ -296,11 +301,16 @@ _SELECTED_ELEMENT_TO_COST_CATEGORY: dict[str, str] = {
     "paint": "paint",
     "lighting": "electrical",
     "furniture": "paint",
-    "roof": "roof",
+    "ceiling": "paint",
     "cabinet": "kitchen",
     "window": "window",
     "stair": "flooring",
     "door": "doors",
+    "roof": "roof",
+    "siding": "exterior",
+    "landscaping": "landscaping",
+    "driveway": "exterior",
+    "fence": "exterior",
 }
 
 _SELECTED_ELEMENT_TO_IMPACTED_LABEL: dict[str, str] = {
@@ -308,11 +318,16 @@ _SELECTED_ELEMENT_TO_IMPACTED_LABEL: dict[str, str] = {
     "paint": "paint finish",
     "lighting": "lighting",
     "furniture": "furniture",
-    "roof": "roof",
+    "ceiling": "ceiling",
     "cabinet": "cabinets",
     "window": "windows",
     "stair": "stairs",
     "door": "doors",
+    "roof": "roof",
+    "siding": "siding",
+    "landscaping": "landscaping",
+    "driveway": "driveway",
+    "fence": "fence",
 }
 
 INTENT_MAP = {
@@ -407,6 +422,7 @@ _CATEGORY_TO_USER_WORK_ITEM: dict[str, str] = {
     "paint": "paint renovation",
     "flooring": "flooring renovation",
     "kitchen": "kitchen renovation",
+    "cabinet": "cabinet renovation",
     "bathroom": "bathroom renovation",
     "window": "window renovation",
     "roof": "roof renovation",
@@ -424,6 +440,7 @@ _CATEGORY_TO_IMPACTED_LABEL: dict[str, str] = {
     "paint": "paint finish",
     "flooring": "flooring",
     "kitchen": "kitchen surfaces",
+    "cabinet": "cabinets",
     "bathroom": "bathroom surfaces",
     "window": "windows",
     "roof": "roofline",
@@ -1341,27 +1358,45 @@ def _build_suggested_work_items(issues: List[str], room_type: str) -> List[str]:
         normalized,
         items,
         ("roof damage", "roof", "sagging roof"),
-        "roof repairs",
+        "roof renovation",
     )
-    _add_work_item_when_matched(normalized, items, ("paint wear", "stains", "paint"), "paint")
+    _add_work_item_when_matched(normalized, items, ("paint wear", "stains", "paint"), "paint renovation")
     _add_work_item_when_matched(
         normalized,
         items,
         ("floor damage", "outdated flooring", "carpet", "floor", "subfloor"),
-        "flooring replacement",
+        "flooring renovation",
     )
-    _add_work_item_when_matched(normalized, items, ("outdated cabinets", "damaged appliances", "cabinet", "kitchen"), "kitchen update")
+    _add_work_item_when_matched(
+        normalized,
+        items,
+        ("outdated cabinets", "cabinet"),
+        "cabinet renovation",
+    )
+    _add_work_item_when_matched(
+        normalized,
+        items,
+        ("damaged appliances", "kitchen"),
+        "kitchen renovation",
+    )
     _add_work_item_when_matched(
         normalized,
         items,
         ("old bathroom", "old tiles", "missing grout", "dirty grout", "broken fixtures", "bath", "tile"),
-        "bathroom update",
+        "bathroom renovation",
     )
     _add_work_item_when_matched(
         normalized,
         items,
-        ("roof damage", "peeling exterior paint", "cracked driveway", "poor landscaping", "rotted wood", "exterior", "garage damage"),
-        "exterior repairs",
+        (
+            "peeling exterior paint",
+            "cracked driveway",
+            "poor landscaping",
+            "rotted wood",
+            "exterior",
+            "garage damage",
+        ),
+        "exterior renovation",
     )
 
     if not items:
@@ -1382,12 +1417,12 @@ def _add_work_item_when_matched(
 def _build_room_fallback_work_items(room_type: str) -> list[str]:
     room = (room_type or "").lower()
     if "kitchen" in room:
-        return ["kitchen refresh"]
+        return ["kitchen renovation"]
     if "bath" in room:
-        return ["bathroom refresh"]
+        return ["bathroom renovation"]
     if "exterior" in room:
-        return ["exterior refresh"]
-    return ["paint", "minor repairs"]
+        return ["exterior renovation"]
+    return ["cosmetic renovation"]
 
 
 def _build_explanation_summary(
@@ -1490,6 +1525,27 @@ def _build_selected_work_items(renovation_elements: List[str]) -> List[str]:
     return items[:8]
 
 
+_LEGACY_WORK_ITEM_LABELS: dict[str, str] = {
+    "paint": "paint renovation",
+    "kitchen update": "kitchen renovation",
+    "bathroom update": "bathroom renovation",
+    "kitchen refresh": "kitchen renovation",
+    "bathroom refresh": "bathroom renovation",
+    "exterior refresh": "exterior renovation",
+    "exterior repairs": "exterior renovation",
+    "roof repairs": "roof renovation",
+    "flooring replacement": "flooring renovation",
+}
+
+
+def _normalize_work_item_display(item: str) -> str:
+    """Single public label shape for API work items (matches selected-element wording)."""
+    t = _normalize_token_text(item)
+    if t in _LEGACY_WORK_ITEM_LABELS:
+        return _LEGACY_WORK_ITEM_LABELS[t]
+    return t
+
+
 def _canonical_work_item_key(item: str) -> str:
     key = _normalize_token_text(item)
     if not key:
@@ -1503,26 +1559,56 @@ def _canonical_work_item_key(item: str) -> str:
         " repair",
         " refresh",
         " replacement",
+        " remediation",
+        " stabilization",
+        " removal",
     ):
         if key.endswith(suffix):
             key = key[: -len(suffix)].strip()
             break
-    # Collapse all flooring-related labels (user intent + issue-derived) to one bucket.
+    if key in ("cabinets", "cabinet"):
+        return "cabinet"
     if key.startswith("flooring"):
         return "flooring"
+    if key in ("kitchen", "kitchens"):
+        return "kitchen"
+    if key in ("bathroom", "bath"):
+        return "bathroom"
+    if key in ("roof", "roofs"):
+        return "roof"
+    if key.startswith("exterior"):
+        return "exterior"
+    if key in ("paint", "painting", "repaint", "primer"):
+        return "paint"
+    if key.startswith("ceiling"):
+        return "ceiling"
+    if key in ("driveway", "driveways"):
+        return "driveway"
+    if key in ("fence", "fencing", "fences"):
+        return "fence"
+    if key in ("landscaping", "landscape", "yard", "lawn"):
+        return "landscaping"
     return key
 
 
 def _deduplicate_work_items(items: List[str]) -> List[str]:
-    seen: set[str] = set()
-    deduped: list[str] = []
-    for item in items:
-        key = _canonical_work_item_key(item)
-        if not key or key in seen:
+    """Unique work items; prefer explicit '* renovation' labels and earlier merge order."""
+    best: dict[str, tuple[int, int, str]] = {}
+    for i, raw in enumerate(items):
+        label = _normalize_work_item_display(raw)
+        bucket = _canonical_work_item_key(label)
+        if not bucket:
             continue
-        seen.add(key)
-        deduped.append(item)
-    return deduped[:10]
+        quality = 2 if label.endswith(" renovation") else 1
+        prev = best.get(bucket)
+        if prev is None:
+            best[bucket] = (i, quality, label)
+            continue
+        pi, pq, pl = prev
+        if quality > pq or (quality == pq and len(label) > len(pl)) or (quality == pq and len(label) == len(pl) and i < pi):
+            best[bucket] = (i, quality, label)
+    ordered = sorted(best.values(), key=lambda t: t[0])
+    return [t[2] for t in ordered][:10]
 
 
 def _clamp(v: float, lo: float, hi: float) -> float:

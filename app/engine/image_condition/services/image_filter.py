@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import httpx
 from PIL import Image
 
+from app.engine.renovation_engine.image_edit_engine import _build_image_download_headers
+
 logger = logging.getLogger(__name__)
 
 ROOM_WEIGHTS: dict[str, float] = {
@@ -25,6 +27,10 @@ DISCARD_ROOMS: set[str] = {
     "swimming pool",
     "garage exterior",
 }
+
+# If CLIP's top label is in DISCARD_ROOMS but below this confidence, use the best non-discard label instead
+# (ViT-B/32 often mislabels interiors as "garage exterior").
+_CLIP_CONFIDENT_DISCARD_THRESHOLD = 0.85
 
 ALL_LABELS = [*ROOM_WEIGHTS.keys(), *DISCARD_ROOMS]
 
@@ -75,7 +81,8 @@ def _heuristic_home_image(url: str) -> bool:
 
 def _download_image_bytes(image_url: str) -> bytes | None:
     try:
-        response = httpx.get(image_url, timeout=12.0, follow_redirects=True)
+        headers = _build_image_download_headers(image_url)
+        response = httpx.get(image_url, timeout=12.0, follow_redirects=True, headers=headers)
         response.raise_for_status()
         return response.content
     except Exception as exc:
@@ -127,9 +134,14 @@ def classify_and_filter(image_urls: list[str]) -> dict[str, object]:
             best_idx = int(probs.argmax().item())
             room_type = ALL_LABELS[best_idx]
             confidence = float(probs[best_idx].item())
-            if room_type in DISCARD_ROOMS:
+            if room_type in DISCARD_ROOMS and confidence >= _CLIP_CONFIDENT_DISCARD_THRESHOLD:
                 discarded_count += 1
                 continue
+            if room_type in DISCARD_ROOMS:
+                keep_indices = [i for i, lab in enumerate(ALL_LABELS) if lab not in DISCARD_ROOMS]
+                best_idx = max(keep_indices, key=lambda i: float(probs[i].item()))
+                room_type = ALL_LABELS[best_idx]
+                confidence = float(probs[best_idx].item())
             selected.append(
                 FilteredImage(
                     image_url=url,
