@@ -45,6 +45,12 @@ _BROWSER_USER_AGENT = (
     "Chrome/131.0.0.0 Safari/537.36"
 )
 
+# MLS/CDN hosts that reject generic server clients unless Referer matches the portal.
+_MLS_HOST_REFERERS: dict[str, str] = {
+    "crmls.org": "https://www.crmls.org/",
+    "mlslistings.com": "https://www.mlslistings.com/",
+}
+
 _OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS = 0.8
 
 _GPT_IMAGE_EDIT_SIZES = {
@@ -93,6 +99,16 @@ async def _wait_for_retry_backoff(attempt: int) -> None:
     await asyncio.sleep(_OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS * (2**attempt))
 
 
+def _referer_for_image_host(host: str) -> str | None:
+    normalized = (host or "").lower().removeprefix("www.")
+    if not normalized:
+        return None
+    for domain, referer in _MLS_HOST_REFERERS.items():
+        if normalized == domain or normalized.endswith(f".{domain}"):
+            return referer
+    return None
+
+
 def _build_image_download_headers(image_url: str) -> dict[str, str]:
     headers: dict[str, str] = {
         "User-Agent": _BROWSER_USER_AGENT,
@@ -100,11 +116,15 @@ def _build_image_download_headers(image_url: str) -> dict[str, str]:
         "Accept-Language": "en-US,en;q=0.9",
     }
     override = (settings.IMAGE_DOWNLOAD_REFERER or "").strip()
+    parsed = urlparse(image_url)
     if override:
         headers["Referer"] = override
-    else:
-        parsed = urlparse(image_url)
-        if parsed.scheme and parsed.netloc:
+    elif parsed.netloc:
+        mls_referer = _referer_for_image_host(parsed.netloc)
+        if mls_referer:
+            headers["Referer"] = mls_referer
+            headers["Origin"] = mls_referer.rstrip("/")
+        elif parsed.scheme:
             headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
     return headers
 
@@ -118,13 +138,20 @@ def _build_proxy_image_urls(image_url: str) -> list[str]:
     else:
         raw = image_url
     candidates: list[str] = []
-    for encoded_value in (
-        quote(raw, safe=""),
-        quote(f"https://{raw}", safe=""),
-    ):
-        url = template.replace("{url_no_scheme_encoded}", encoded_value)
-        if url not in candidates:
-            candidates.append(url)
+    placeholder_values = {
+        "url_no_scheme_encoded": (quote(raw, safe=""), quote(f"https://{raw}", safe="")),
+        "url_full_encoded": (quote(image_url, safe=""),),
+    }
+    for placeholder, encoded_values in placeholder_values.items():
+        token = "{" + placeholder + "}"
+        if token not in template:
+            continue
+        for encoded_value in encoded_values:
+            url = template.replace(token, encoded_value)
+            if url not in candidates:
+                candidates.append(url)
+    if not candidates and "{url_no_scheme_encoded}" not in template and "{url_full_encoded}" not in template:
+        candidates.append(template.replace("{url}", quote(image_url, safe="")))
     return candidates
 
 
@@ -775,18 +802,12 @@ async def image_url_as_openai_vision_payload(image_url: str) -> str:
     Prefer a data URL for OpenAI vision so their servers do not fetch the URL.
 
     Presigned object-storage URLs often time out from OpenAI (400 invalid_request_error).
+    MLS/CDN URLs that return 403 must be re-hosted or configured via IMAGE_DOWNLOAD_REFERER;
+    we do not pass the raw URL through (OpenAI would hit the same block).
     """
     url = (image_url or "").strip()
     if not url:
         return ""
-    try:
-        image_bytes, media_type = await _download_source_image(url)
-        b64 = base64.b64encode(image_bytes).decode("ascii")
-        return f"data:{media_type};base64,{b64}"
-    except Exception as exc:
-        logger.warning(
-            "OpenAI vision: server-side download failed (%s): %s",
-            url[:120] + ("…" if len(url) > 120 else ""),
-            exc,
-        )
-        return url
+    image_bytes, media_type = await _download_source_image(url)
+    b64 = base64.b64encode(image_bytes).decode("ascii")
+    return f"data:{media_type};base64,{b64}"

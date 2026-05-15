@@ -101,7 +101,11 @@ async def _resolve_image_condition(
         return await analyze_renovation_image_url(payload.image_url)
     except Exception as vision_exc:
         logger.warning("Renovation vision analysis failed: %s", vision_exc)
-        pipeline_warnings.append("Vision analysis failed; estimate used fallback condition inputs.")
+        pipeline_warnings.append(
+            "Vision analysis failed; estimate used fallback condition inputs. "
+            "If the image URL is from an MLS/CDN (e.g. media.crmls.org), re-host the photo on your "
+            "storage or set IMAGE_DOWNLOAD_REFERER to the MLS portal URL."
+        )
         return _build_fallback_image_condition()
 
 
