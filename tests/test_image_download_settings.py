@@ -1,5 +1,7 @@
 """Unit tests for per-flow MLS image download settings."""
 
+import httpx
+
 from app.core import image_download as mod
 
 
@@ -57,3 +59,13 @@ def test_flow_specific_proxy_overrides_global(monkeypatch) -> None:
         mod.image_download_proxy_template("condition_score")
         == "https://proxy.score/{url_full_encoded}"
     )
+
+
+def test_response_body_snippet_includes_s3_error_code() -> None:
+    xml = (
+        '<?xml version="1.0"?><Error><Code>AccessDenied</Code>'
+        "<Message>Access Denied</Message></Error>"
+    )
+    response = httpx.Response(403, text=xml)
+    snippet = mod._response_body_snippet(response, limit=500)
+    assert "AccessDenied" in snippet

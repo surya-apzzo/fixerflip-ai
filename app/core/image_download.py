@@ -12,6 +12,8 @@ from app.core.config import settings
 
 logger = logging.getLogger(__name__)
 
+_RESPONSE_BODY_SNIPPET_LIMIT = 500
+
 ImageDownloadFlow = Literal["renovation", "condition_score"]
 
 _BROWSER_USER_AGENT = (
@@ -143,6 +145,71 @@ def _proxy_urls_from_template(template: str, image_url: str) -> list[str]:
     return candidates
 
 
+def _response_body_snippet(
+    response: httpx.Response | None,
+    *,
+    limit: int = _RESPONSE_BODY_SNIPPET_LIMIT,
+) -> str:
+    if response is None:
+        return ""
+    try:
+        text = response.text or ""
+    except Exception:
+        text = (response.content or b"").decode("utf-8", errors="replace")
+    return text[:limit]
+
+
+def _response_headers_snapshot(response: httpx.Response | None) -> dict[str, str]:
+    if response is None:
+        return {}
+    return dict(response.headers)
+
+
+def _request_headers_for_log(headers: dict[str, str]) -> dict[str, str]:
+    """Log sent headers as-is (Referer/Origin help debug dev vs local; no secrets are set here)."""
+    return dict(headers)
+
+
+def _log_image_download_http_failure(
+    *,
+    image_url: str,
+    flow: ImageDownloadFlow,
+    attempt: str,
+    request_url: str,
+    request_headers: dict[str, str],
+    response: httpx.Response | None = None,
+    exc: Exception | None = None,
+) -> None:
+    """
+    Log status, response headers, and body snippet (e.g. AccessDenied, Forbidden XML).
+    Use dev logs to compare with local when Cotality URLs fail only in one environment.
+    """
+    if isinstance(exc, httpx.HTTPStatusError) and exc.response is not None:
+        response = exc.response
+
+    status_code = response.status_code if response is not None else None
+    if status_code is None and exc is not None:
+        status_code = getattr(exc, "status_code", None)
+
+    body_snippet = _response_body_snippet(response)
+    response_headers = _response_headers_snapshot(response)
+
+    logger.warning(
+        "Image download HTTP failure | flow=%s attempt=%s status_code=%s "
+        "listing_url=%s request_url=%s request_headers=%s response_headers=%s "
+        "response_body_snippet=%s exc=%s",
+        flow,
+        attempt,
+        status_code,
+        image_url[:200],
+        request_url[:200],
+        _request_headers_for_log(request_headers),
+        response_headers,
+        body_snippet,
+        repr(exc) if exc is not None else None,
+    )
+
+
 def build_proxy_image_urls(image_url: str, *, flow: ImageDownloadFlow) -> list[str]:
     templates: list[str] = []
     configured = image_download_proxy_template(flow)
@@ -168,7 +235,7 @@ def _try_proxy_download(
     timeout: float,
     headers: dict[str, str],
 ) -> bytes | None:
-    for proxy_url in proxy_urls:
+    for index, proxy_url in enumerate(proxy_urls, start=1):
         try:
             proxy_response = httpx.get(
                 proxy_url,
@@ -180,8 +247,34 @@ def _try_proxy_download(
             content = proxy_response.content
             if content and len(content) > 256:
                 return content
+            _log_image_download_http_failure(
+                image_url=image_url,
+                flow=flow,
+                attempt=f"proxy_{index}_too_small",
+                request_url=proxy_url,
+                request_headers=headers,
+                response=proxy_response,
+            )
+        except httpx.HTTPStatusError as proxy_exc:
+            _log_image_download_http_failure(
+                image_url=image_url,
+                flow=flow,
+                attempt=f"proxy_{index}",
+                request_url=proxy_url,
+                request_headers=headers,
+                exc=proxy_exc,
+            )
         except Exception as proxy_exc:
-            logger.debug("Proxy download failed for %s via %s: %s", image_url[:80], proxy_url[:80], proxy_exc)
+            logger.warning(
+                "Image download proxy error | flow=%s attempt=proxy_%s listing_url=%s "
+                "request_url=%s request_headers=%s exc=%s",
+                flow,
+                index,
+                image_url[:200],
+                proxy_url[:200],
+                _request_headers_for_log(headers),
+                proxy_exc,
+            )
     return None
 
 
@@ -198,16 +291,25 @@ def download_listing_image_bytes(
 
     headers = build_image_download_headers(cleaned, flow=flow)
     try:
-        response = httpx.get(cleaned, 
-                             timeout=timeout, 
-                             follow_redirects=True, 
-                             headers=headers)
+        response = httpx.get(
+            cleaned,
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers,
+        )
         response.raise_for_status()
         return response.content
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else None
+        _log_image_download_http_failure(
+            image_url=cleaned,
+            flow=flow,
+            attempt="direct",
+            request_url=cleaned,
+            request_headers=headers,
+            exc=exc,
+        )
         if status not in (401, 403):
-            logger.warning("Skipping image download for URL %s: HTTP %s", cleaned[:120], status)
             return None
         proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
         content = _try_proxy_download(
@@ -221,12 +323,17 @@ def download_listing_image_bytes(
             return content
         logger.warning(
             "Skipping image download for URL %s: HTTP %s; direct + %s proxy URL(s) failed (%s)",
-            cleaned[:120],
+            cleaned[:200],
             status,
             len(proxy_urls),
             image_download_config_summary(flow),
         )
         return None
     except Exception as exc:
-        logger.warning("Skipping image download for URL %s: %s", cleaned[:120], exc)
+        logger.warning(
+            "Skipping image download for URL %s: %s | request_headers=%s",
+            cleaned[:200],
+            exc,
+            _request_headers_for_log(headers),
+        )
         return None
