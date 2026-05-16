@@ -156,6 +156,27 @@ def put_listing_image_cache(
         return None
 
 
+def stage_listing_image_from_bytes(
+    source_url: str,
+    image_bytes: bytes,
+    *,
+    property_id: str = "",
+) -> ListingImageStageResult:
+    """Upload raw image bytes to listing cache (demo / mobile upload path)."""
+    cleaned = (source_url or "").strip()
+    if not cleaned:
+        raise ValueError("image_url is required.")
+    if not image_bytes:
+        raise ValueError("Image file is empty.")
+    if not is_valid_image_bytes(image_bytes):
+        raise ValueError("Uploaded file is not a valid image (JPEG/PNG/WebP).")
+    return stage_listing_image_for_renovation(
+        cleaned,
+        property_id=property_id,
+        source_image_base64=base64.b64encode(image_bytes).decode("ascii"),
+    )
+
+
 def _decode_source_image_base64(raw: str) -> bytes:
     cleaned = (raw or "").strip()
     if not cleaned:

@@ -433,11 +433,12 @@ def download_listing_image_with_meta(
             bearer_sent=bearer_sent,
         )
 
-    # Public proxies cannot forward Trestle Bearer auth to Cotality media URLs.
-    if trestle_url and trestle_credentials_configured():
-        auth_note = "Bearer sent" if bearer_sent else "Bearer not obtained (token fetch failed)"
+    # When Bearer was sent and rejected, proxies cannot help. If token/WAF blocked Bearer,
+    # still try public proxies (occasionally works for CDN-mirrored paths).
+    if trestle_url and trestle_credentials_configured() and bearer_sent:
+        auth_note = "Bearer sent"
         logger.warning(
-            "Skipping image download for Trestle media URL %s: HTTP %s (%s; waf_blocked=%s) %s",
+            "Skipping proxy fallback for Trestle media URL %s: HTTP %s (%s; waf_blocked=%s) %s",
             cleaned[:200],
             status,
             auth_note,
@@ -448,6 +449,11 @@ def download_listing_image_with_meta(
             http_status=status,
             waf_blocked=waf_blocked,
             bearer_sent=bearer_sent,
+        )
+    if trestle_url and waf_blocked and not bearer_sent:
+        logger.info(
+            "Trestle token/WAF blocked; trying public image proxies for %s",
+            cleaned[:120],
         )
 
     proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
