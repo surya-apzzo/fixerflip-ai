@@ -9,6 +9,7 @@ def build_renovation_estimate_response(
     room_type: str = "unknown",
     condition_score: int,
     renovated_image_url: str | None = None,
+    staged_source_image_url: str | None = None,
 ) -> RenovationEstimateResponse:
     """Build the renovation estimate response from the estimate."""
     rt = (room_type or "").strip() or "unknown"
@@ -22,4 +23,5 @@ def build_renovation_estimate_response(
         room_type=rt,
         condition_score=condition_score,
         renovated_image_url=renovated_image_url,
+        staged_source_image_url=staged_source_image_url,
     )

@@ -567,6 +567,7 @@ def validate_and_normalize_renovation_payload(
         update={
             "property_id": _normalize_optional_string(payload.property_id),
             "image_url": _normalize_optional_string(payload.image_url),
+            "source_image_base64": _normalize_optional_string(payload.source_image_base64),
             "zip_code": _normalize_optional_string(payload.zip_code),
             "listing_description": _normalize_optional_string(payload.listing_description),
             "type_of_renovation": type_stored,

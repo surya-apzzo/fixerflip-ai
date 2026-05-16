@@ -21,6 +21,10 @@ from app.schemas.requests.renovation import RenovationEstimateRequest
 from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.services.renovation_payload_validator import validate_and_normalize_renovation_payload
 from app.services.renovation_response_mapper import build_renovation_estimate_response
+from app.services.listing_image_storage import (
+    resolve_effective_property_id,
+    stage_listing_image_for_renovation_async,
+)
 from app.services.storage_service import upload_base64_image_to_bucket
 
 logger = logging.getLogger(__name__)
@@ -81,6 +85,51 @@ def _resolve_visual_scope_hint(payload: RenovationEstimateRequest) -> str:
             return payload.renovation_elements[0].replace(" ", "_").lower()
         return "targeted_elements"
     return "investor_standard"
+
+
+async def _stage_payload_listing_image(
+    payload: RenovationEstimateRequest,
+) -> tuple[RenovationEstimateRequest, str | None]:
+    """
+    Upload listing photo to S3 first; run vision/edit against the bucket URL.
+
+    Returns updated payload (image_url replaced when staged) and staged public URL for the response.
+    """
+    if not (payload.image_url or "").strip() and not (payload.source_image_base64 or "").strip():
+        return payload, None
+
+    try:
+        staged = await stage_listing_image_for_renovation_async(
+            payload.image_url,
+            property_id=payload.property_id,
+            source_image_base64=payload.source_image_base64,
+        )
+    except ValueError as exc:
+        logger.warning("Renovation listing image staging failed: %s", exc)
+        raise
+
+    if staged.source != "already_staged":
+        logger.info(
+            "Renovation using staged listing image source=%s property_id=%s url=%s",
+            staged.source,
+            payload.property_id or "(from url)",
+            staged.url[:160],
+        )
+    elif staged.url != payload.image_url:
+        logger.info("Renovation listing image already on bucket: %s", staged.url[:160])
+
+    original_url = payload.image_url
+    updated = payload.model_copy(
+        update={
+            "image_url": staged.url,
+            "property_id": resolve_effective_property_id(
+                payload.property_id,
+                original_url,
+                flow="renovation",
+            ),
+        }
+    )
+    return updated, staged.url
 
 
 def _build_fallback_image_condition() -> ImageConditionResult:
@@ -325,10 +374,28 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
 
     pipeline_warnings: list[str] = []
     renovated_image_url: str | None = None
+    staged_source_image_url: str | None = None
     user_scope_categories = infer_user_scope_categories(
         payload.user_inputs,
         payload.renovation_elements,
     )
+
+    if payload.image_url or (payload.source_image_base64 or "").strip():
+        t_stage = time.perf_counter()
+        try:
+            payload, staged_source_image_url = await _stage_payload_listing_image(payload)
+        except ValueError as stage_exc:
+            logger.warning(
+                "Renovation aborted: could not stage listing image in %.1fms: %s",
+                (time.perf_counter() - t_stage) * 1000,
+                stage_exc,
+            )
+            raise
+        logger.debug(
+            "Renovation listing image staged in %.1fms url=%s",
+            (time.perf_counter() - t_stage) * 1000,
+            bool(staged_source_image_url),
+        )
 
     if payload.image_url:
         visual_scope_hint = _resolve_visual_scope_hint(payload)
@@ -425,6 +492,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         room_type=estimate_input.room_type,
         condition_score=int(image_condition.condition_score),
         renovated_image_url=renovated_image_url,
+        staged_source_image_url=staged_source_image_url,
     )
     logger.info(
         "Renovation estimate request end class=%s range=%s warnings=%s duration_ms=%.1f",

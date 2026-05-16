@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hashlib
 import logging
 import re
@@ -12,7 +14,12 @@ from app.core.config import settings
 from app.core.image_bytes import guess_image_media_type, is_valid_image_bytes
 from app.core.image_download import ImageDownloadFlow, download_listing_image_with_meta, image_download_config_summary
 from app.core.trestle_auth import is_trestle_media_url, trestle_credentials_configured
-from app.services.storage_service import _make_s3_client, _require_storage_config, _upload_bytes_to_bucket
+from app.services.storage_service import (
+    _make_s3_client,
+    _require_storage_config,
+    _upload_bytes_to_bucket,
+    public_url_for_object_key,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +30,18 @@ class ListingImageResolveResult:
     source: str = "none"
     waf_blocked: bool = False
     cached_public_url: str | None = None
+
+
+@dataclass(slots=True)
+class ListingImageStageResult:
+    """Listing photo staged on our bucket for renovation vision/edit."""
+
+    url: str
+    source: str
+    storage_key: str | None = None
+
+
+_TRESTLE_PROPERTY_ID_RE = re.compile(r"/Media/Property/PHOTO-Jpeg/(\d+)/", re.IGNORECASE)
 
 
 def listing_image_storage_configured() -> bool:
@@ -39,16 +58,25 @@ def _cache_prefix(flow: ImageDownloadFlow) -> str:
     return (settings.STORAGE_CONDITION_SCORE_IMAGE_PREFIX or "condition-score/listings").strip("/")
 
 
-def _normalize_property_id(property_id: str, *, flow: ImageDownloadFlow) -> str:
-    safe = re.sub(r"[^a-zA-Z0-9._-]+", "_", (property_id or "").strip())[:80]
-    if safe:
-        return safe
+def extract_property_id_from_listing_url(url: str) -> str:
+    """Best-effort MLS id from Cotality Trestle media paths."""
+    match = _TRESTLE_PROPERTY_ID_RE.search(url or "")
+    return match.group(1) if match else ""
+
+
+def resolve_effective_property_id(property_id: str, source_url: str, *, flow: ImageDownloadFlow) -> str:
+    explicit = re.sub(r"[^a-zA-Z0-9._-]+", "_", (property_id or "").strip())[:80]
+    if explicit:
+        return explicit
+    from_url = extract_property_id_from_listing_url(source_url)
+    if from_url:
+        return from_url
     return "renovation" if flow == "renovation" else "unknown"
 
 
 def _cache_key(property_id: str, source_url: str, *, flow: ImageDownloadFlow) -> str:
     digest = hashlib.sha256(source_url.strip().encode("utf-8")).hexdigest()[:32]
-    safe_id = _normalize_property_id(property_id, flow=flow)
+    safe_id = resolve_effective_property_id(property_id, source_url, flow=flow)
     return f"{_cache_prefix(flow)}/{safe_id}/{digest}.jpg"
 
 
@@ -108,10 +136,128 @@ def put_listing_image_cache(
         return None
     key = _cache_key(property_id, source_url, flow=flow)
     try:
-        return _upload_bytes_to_bucket(image_bytes, key=key, content_type="image/jpeg")
+        _upload_bytes_to_bucket(image_bytes, key=key, content_type="image/jpeg")
+        return public_url_for_object_key(key)
     except Exception as exc:
         logger.warning("Listing image S3 cache upload failed key=%s: %s", key, exc)
         return None
+
+
+def _decode_source_image_base64(raw: str) -> bytes:
+    cleaned = (raw or "").strip()
+    if not cleaned:
+        raise ValueError("source_image_base64 is empty.")
+    if cleaned.startswith("data:") and "," in cleaned:
+        cleaned = cleaned.split(",", 1)[1]
+    try:
+        data = base64.b64decode(cleaned, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("source_image_base64 is not valid base64.") from exc
+    if not is_valid_image_bytes(data):
+        raise ValueError("source_image_base64 is not a valid image.")
+    return data
+
+
+def stage_listing_image_for_renovation(
+    source_url: str,
+    *,
+    property_id: str = "",
+    source_image_base64: str = "",
+) -> ListingImageStageResult:
+    """
+    Stage a listing photo on S3 and return a bucket URL for vision + image edit.
+
+    Order: already on our bucket → S3 cache hit → client base64 upload → HTTP download + upload.
+    """
+    cleaned = (source_url or "").strip()
+    if not cleaned and not (source_image_base64 or "").strip():
+        raise ValueError("image_url or source_image_base64 is required.")
+
+    if not listing_image_storage_configured():
+        raise ValueError(
+            "STORAGE_* is not configured. Set bucket credentials so listing photos can be staged "
+            "before renovation (required when Cotality/Incapsula blocks Railway)."
+        )
+
+    cache_id = resolve_effective_property_id(property_id, cleaned, flow="renovation")
+
+    if cleaned and is_own_storage_url(cleaned):
+        key = public_url_to_storage_key(cleaned)
+        return ListingImageStageResult(url=cleaned, source="already_staged", storage_key=key)
+
+    if cleaned:
+        cache_key = _cache_key(cache_id, cleaned, flow="renovation")
+        cached = get_cached_listing_bytes(cache_id, cleaned, flow="renovation")
+        if cached is not None:
+            staged_url = public_url_for_object_key(cache_key)
+            logger.info(
+                "Renovation listing image already in S3 cache property_id=%s key=%s",
+                cache_id,
+                cache_key,
+            )
+            return ListingImageStageResult(
+                url=staged_url,
+                source="s3_cache",
+                storage_key=cache_key,
+            )
+
+    if (source_image_base64 or "").strip():
+        if not cleaned:
+            raise ValueError("image_url is required with source_image_base64 (used as cache key).")
+        image_bytes = _decode_source_image_base64(source_image_base64)
+        staged_url = put_listing_image_cache(cache_id, cleaned, image_bytes, flow="renovation")
+        if not staged_url:
+            raise ValueError("Failed to upload source_image_base64 to listing image cache.")
+        cache_key = _cache_key(cache_id, cleaned, flow="renovation")
+        logger.info(
+            "Renovation listing image staged from client base64 property_id=%s key=%s bytes=%s",
+            cache_id,
+            cache_key,
+            len(image_bytes),
+        )
+        return ListingImageStageResult(
+            url=staged_url,
+            source="client_base64",
+            storage_key=cache_key,
+        )
+
+    if not cleaned:
+        raise ValueError("image_url is required.")
+
+    resolved = resolve_listing_image_bytes(cleaned, property_id=cache_id, flow="renovation")
+    if resolved.content is not None and is_valid_image_bytes(resolved.content):
+        cache_key = _cache_key(cache_id, cleaned, flow="renovation")
+        staged_url = resolved.cached_public_url or public_url_for_object_key(cache_key)
+        logger.info(
+            "Renovation listing image staged after download property_id=%s source=%s key=%s",
+            cache_id,
+            resolved.source,
+            cache_key,
+        )
+        return ListingImageStageResult(
+            url=staged_url,
+            source="uploaded" if resolved.source == "download" else resolved.source,
+            storage_key=cache_key,
+        )
+
+    raise ValueError(
+        renovation_listing_download_error_message(resolved, image_url=cleaned)
+        + " Or send source_image_base64 (photo bytes from your app/browser) to stage without server download."
+    )
+
+
+async def stage_listing_image_for_renovation_async(
+    source_url: str,
+    *,
+    property_id: str = "",
+    source_image_base64: str = "",
+) -> ListingImageStageResult:
+    return await asyncio.to_thread(
+        stage_listing_image_for_renovation,
+        source_url,
+        property_id=property_id,
+        source_image_base64=source_image_base64,
+    )
 
 
 def resolve_listing_image_bytes(
@@ -131,7 +277,7 @@ def resolve_listing_image_bytes(
     if not cleaned:
         return ListingImageResolveResult(content=None, source="empty")
 
-    cache_id = _normalize_property_id(property_id, flow=flow)
+    cache_id = resolve_effective_property_id(property_id, cleaned, flow=flow)
 
     own_key = public_url_to_storage_key(cleaned)
     if own_key:

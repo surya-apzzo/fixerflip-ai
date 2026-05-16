@@ -46,6 +46,36 @@ def _build_public_url(key: str) -> str:
     return f"{settings.STORAGE_ENDPOINT_URL.rstrip('/')}/{settings.STORAGE_BUCKET_NAME}/{key}"
 
 
+def public_url_for_object_key(key: str) -> str:
+    """Stable GET URL for an object key (public CDN base when configured, else presigned)."""
+    _require_storage_config()
+    raw = (key or "").strip()
+    if not raw:
+        raise ValueError("Object key is required.")
+    public_base = (settings.STORAGE_PUBLIC_BASE_URL or "").strip()
+    if public_base:
+        return _build_public_url(raw)
+    client = _make_s3_client()
+    try:
+        return client.generate_presigned_url(
+            "get_object",
+            Params={"Bucket": settings.STORAGE_BUCKET_NAME, "Key": raw},
+            ExpiresIn=settings.STORAGE_PRESIGNED_URL_TTL_SECONDS,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Presigned GET failed for key=%s: %s: %s",
+            raw,
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        raise ValueError(
+            "Could not build a download URL for staged listing image. "
+            "Set STORAGE_PUBLIC_BASE_URL or fix STORAGE_* credentials."
+        ) from exc
+
+
 def _upload_bytes_to_bucket(image_bytes: bytes, *, key: str, content_type: str) -> str:
     logger.debug(
         "Uploading renovated image endpoint=%s bucket=%s key=%s bytes=%s",

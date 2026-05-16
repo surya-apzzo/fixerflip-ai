@@ -12,7 +12,16 @@ router = APIRouter(prefix="/renovation")
 
 @router.post("/estimate", response_model=RenovationEstimateResponse)
 async def renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
-    return await build_renovation_estimate(payload)
+    try:
+        return await build_renovation_estimate(payload)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={
+                "code": "LISTING_IMAGE_STAGING_FAILED",
+                "message": str(exc),
+            },
+        ) from exc
 
 
 

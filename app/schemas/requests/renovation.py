@@ -14,6 +14,13 @@ class RenovationEstimateRequest(BaseModel):
         ),
     )
     image_url: str = ""
+    source_image_base64: str = Field(
+        default="",
+        description=(
+            "Optional JPEG/PNG as base64 (or data URL). When Cotality blocks server download, "
+            "send photo bytes from your app; staged to S3 under renovation/listings/ before vision/edit."
+        ),
+    )
     sqft: float
     year_built: int | None = None
     listing_price: float = 0.0

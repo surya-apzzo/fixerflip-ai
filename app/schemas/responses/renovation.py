@@ -17,3 +17,7 @@ class RenovationEstimateResponse(BaseModel):
         description="Condition score used for this estimate (0–100; vision-derived when image_url is sent, else request value).",
     )
     renovated_image_url: str | None = None
+    staged_source_image_url: str | None = Field(
+        default=None,
+        description="Listing photo URL on your bucket used for vision/edit (after S3 staging).",
+    )
