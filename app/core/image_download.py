@@ -9,6 +9,12 @@ from urllib.parse import quote, urlparse
 import httpx
 
 from app.core.config import settings
+from app.core.trestle_auth import (
+    clear_trestle_token_cache,
+    get_trestle_access_token,
+    is_trestle_media_url,
+    trestle_credentials_configured,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,10 +103,16 @@ def image_download_config_summary(flow: ImageDownloadFlow) -> dict[str, Any]:
         "proxy_configured": bool(proxy_template),
         "referer_env": _FLOW_REFERER_ENV[flow],
         "proxy_env": _FLOW_PROXY_ENV[flow],
+        "trestle_auth_configured": trestle_credentials_configured(),
     }
 
 
-def build_image_download_headers(image_url: str, *, flow: ImageDownloadFlow) -> dict[str, str]:
+def build_image_download_headers(
+    image_url: str,
+    *,
+    flow: ImageDownloadFlow,
+    force_refresh_trestle_token: bool = False,
+) -> dict[str, str]:
     headers: dict[str, str] = {
         "User-Agent": _BROWSER_USER_AGENT,
         "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
@@ -117,6 +129,21 @@ def build_image_download_headers(image_url: str, *, flow: ImageDownloadFlow) -> 
         headers["Referer"] = override
     elif parsed.scheme and parsed.netloc:
         headers["Referer"] = f"{parsed.scheme}://{parsed.netloc}/"
+
+    if is_trestle_media_url(image_url):
+        token = get_trestle_access_token(force_refresh=force_refresh_trestle_token)
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        elif trestle_credentials_configured():
+            logger.warning(
+                "Trestle media URL without Bearer token (token fetch failed): %s",
+                image_url[:200],
+            )
+        else:
+            logger.debug(
+                "Trestle media URL without TRESTLE_CLIENT_ID/SECRET configured: %s",
+                image_url[:200],
+            )
     return headers
 
 
@@ -166,8 +193,11 @@ def _response_headers_snapshot(response: httpx.Response | None) -> dict[str, str
 
 
 def _request_headers_for_log(headers: dict[str, str]) -> dict[str, str]:
-    """Log sent headers as-is (Referer/Origin help debug dev vs local; no secrets are set here)."""
-    return dict(headers)
+    """Log sent headers; redact Bearer tokens."""
+    out = dict(headers)
+    if out.get("Authorization", "").startswith("Bearer "):
+        out["Authorization"] = "Bearer ***"
+    return out
 
 
 def _log_image_download_http_failure(
@@ -278,62 +308,112 @@ def _try_proxy_download(
     return None
 
 
+def _download_direct(
+    *,
+    image_url: str,
+    flow: ImageDownloadFlow,
+    timeout: float,
+    attempt: str,
+    force_refresh_trestle_token: bool = False,
+) -> tuple[bytes | None, int | None]:
+    """GET listing URL; returns (content, http_status_on_failure)."""
+    headers = build_image_download_headers(
+        image_url,
+        flow=flow,
+        force_refresh_trestle_token=force_refresh_trestle_token,
+    )
+    try:
+        response = httpx.get(
+            image_url,
+            timeout=timeout,
+            follow_redirects=True,
+            headers=headers,
+        )
+        response.raise_for_status()
+        return response.content, None
+    except httpx.HTTPStatusError as exc:
+        status = exc.response.status_code if exc.response is not None else None
+        _log_image_download_http_failure(
+            image_url=image_url,
+            flow=flow,
+            attempt=attempt,
+            request_url=image_url,
+            request_headers=headers,
+            exc=exc,
+        )
+        return None, status
+    except Exception as exc:
+        logger.warning(
+            "Skipping image download for URL %s: %s | request_headers=%s",
+            image_url[:200],
+            exc,
+            _request_headers_for_log(headers),
+        )
+        return None, None
+
+
 def download_listing_image_bytes(
     image_url: str,
     *,
     flow: ImageDownloadFlow,
     timeout: float = 20.0,
 ) -> bytes | None:
-    """Download one listing photo; try configured + built-in proxies on HTTP 401/403."""
+    """Download one listing photo; Trestle URLs use OAuth Bearer when configured."""
     cleaned = (image_url or "").strip()
     if not cleaned:
         return None
 
-    headers = build_image_download_headers(cleaned, flow=flow)
-    try:
-        response = httpx.get(
-            cleaned,
-            timeout=timeout,
-            follow_redirects=True,
-            headers=headers,
-        )
-        response.raise_for_status()
-        return response.content
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code if exc.response is not None else None
-        _log_image_download_http_failure(
+    trestle_url = is_trestle_media_url(cleaned)
+    content, status = _download_direct(
+        image_url=cleaned,
+        flow=flow,
+        timeout=timeout,
+        attempt="direct",
+    )
+    if content is not None:
+        return content
+
+    if status == 401 and trestle_url and trestle_credentials_configured():
+        clear_trestle_token_cache()
+        content, status = _download_direct(
             image_url=cleaned,
             flow=flow,
-            attempt="direct",
-            request_url=cleaned,
-            request_headers=headers,
-            exc=exc,
-        )
-        if status not in (401, 403):
-            return None
-        proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
-        content = _try_proxy_download(
-            image_url=cleaned,
-            flow=flow,
-            proxy_urls=proxy_urls,
             timeout=timeout,
-            headers=headers,
+            attempt="direct_token_refresh",
+            force_refresh_trestle_token=True,
         )
         if content is not None:
             return content
+
+    if status not in (401, 403):
+        return None
+
+    # Public proxies cannot forward Trestle Bearer auth to Cotality media URLs.
+    if trestle_url and trestle_credentials_configured():
         logger.warning(
-            "Skipping image download for URL %s: HTTP %s; direct + %s proxy URL(s) failed (%s)",
+            "Skipping image download for Trestle media URL %s: HTTP %s after Bearer auth (%s)",
             cleaned[:200],
             status,
-            len(proxy_urls),
             image_download_config_summary(flow),
         )
         return None
-    except Exception as exc:
-        logger.warning(
-            "Skipping image download for URL %s: %s | request_headers=%s",
-            cleaned[:200],
-            exc,
-            _request_headers_for_log(headers),
-        )
-        return None
+
+    proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
+    headers = build_image_download_headers(cleaned, flow=flow)
+    content = _try_proxy_download(
+        image_url=cleaned,
+        flow=flow,
+        proxy_urls=proxy_urls,
+        timeout=timeout,
+        headers=headers,
+    )
+    if content is not None:
+        return content
+    logger.warning(
+        "Skipping image download for URL %s: HTTP %s; direct + %s proxy URL(s) failed (%s)",
+        cleaned[:200],
+        status,
+        len(proxy_urls),
+        image_download_config_summary(flow),
+    )
+    return None

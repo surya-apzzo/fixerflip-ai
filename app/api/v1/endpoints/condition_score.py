@@ -36,10 +36,10 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                 detail={
                     "code": "IMAGE_DOWNLOAD_FAILED",
                     "message": (
-                        "Could not download listing photo URLs (HTTP 403). Cotality/Trestle "
-                        "(api.cotality.com) blocks cloud servers and image proxies. Re-host photos "
-                        "on your S3/CDN and pass those URLs in image_urls, or ensure URLs are "
-                        "publicly reachable from this server."
+                        "Could not download listing photo URLs. For Cotality/Trestle "
+                        "(api.cotality.com/trestle/Media/...) set TRESTLE_CLIENT_ID, "
+                        "TRESTLE_CLIENT_SECRET, and TRESTLE_BASE_URL so downloads use OAuth Bearer "
+                        "auth; otherwise re-host photos on your S3/CDN."
                     ),
                     "meta": {
                         "total_input": total_input,

@@ -120,6 +120,23 @@ class Settings(BaseSettings):
     RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE: str = ""
     CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER: str = ""
     CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE: str = ""
+
+    # Cotality Trestle OAuth2 (client credentials) for api.cotality.com/trestle/Media/* downloads.
+    TRESTLE_BASE_URL: str = Field(
+        default="https://api.cotality.com",
+        description="Trestle API host (token + media).",
+    )
+    TRESTLE_CLIENT_ID: str = ""
+    TRESTLE_CLIENT_SECRET: str = ""
+    TRESTLE_TOKEN_PATH: str = Field(
+        default="/trestle/oidc/connect/token",
+        description="OAuth2 token path on TRESTLE_BASE_URL.",
+    )
+    TRESTLE_TOKEN_SCOPE: str = Field(
+        default="api",
+        description="OAuth2 scope for client_credentials grant.",
+    )
+
     STORAGE_ENDPOINT_URL: str = ""
     STORAGE_REGION: str = "auto"
     STORAGE_BUCKET_NAME: str = ""
@@ -252,6 +269,11 @@ class Settings(BaseSettings):
         "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE",
         "CONDITION_SCORE_IMAGE_DOWNLOAD_REFERER",
         "CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE",
+        "TRESTLE_BASE_URL",
+        "TRESTLE_CLIENT_ID",
+        "TRESTLE_CLIENT_SECRET",
+        "TRESTLE_TOKEN_PATH",
+        "TRESTLE_TOKEN_SCOPE",
         mode="before",
     )
     @classmethod
