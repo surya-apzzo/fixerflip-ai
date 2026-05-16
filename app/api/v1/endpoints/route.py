@@ -15,11 +15,22 @@ async def renovation_estimate(payload: RenovationEstimateRequest) -> RenovationE
     try:
         return await build_renovation_estimate(payload)
     except ValueError as exc:
+        from app.services.listing_image_storage import extract_property_id_from_listing_url
+
+        image_url = (payload.image_url or "").strip()
+        effective_pid = (payload.property_id or "").strip() or extract_property_id_from_listing_url(
+            image_url
+        )
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "LISTING_IMAGE_STAGING_FAILED",
                 "message": str(exc),
+                "effective_property_id": effective_pid or None,
+                "hint": (
+                    "Railway cannot download Cotality URLs directly. "
+                    "Send source_image_base64, pre-warm S3 from local, or use TRESTLE_HTTP_PROXY."
+                ),
             },
         ) from exc
 

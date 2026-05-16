@@ -125,6 +125,19 @@ def get_cached_listing_bytes(property_id: str, source_url: str, *, flow: ImageDo
     return _get_bytes_by_key(_cache_key(property_id, source_url, flow=flow))
 
 
+def get_cached_listing_bytes_any_flow(
+    property_id: str,
+    source_url: str,
+) -> tuple[bytes, ImageDownloadFlow, str] | None:
+    """S3 cache lookup across renovation + condition-score prefixes (same URL hash)."""
+    for flow in ("renovation", "condition_score"):
+        key = _cache_key(property_id, source_url, flow=flow)
+        data = _get_bytes_by_key(key)
+        if data is not None:
+            return data, flow, key
+    return None
+
+
 def put_listing_image_cache(
     property_id: str,
     source_url: str,
@@ -186,18 +199,32 @@ def stage_listing_image_for_renovation(
         return ListingImageStageResult(url=cleaned, source="already_staged", storage_key=key)
 
     if cleaned:
-        cache_key = _cache_key(cache_id, cleaned, flow="renovation")
-        cached = get_cached_listing_bytes(cache_id, cleaned, flow="renovation")
-        if cached is not None:
-            staged_url = public_url_for_object_key(cache_key)
+        cache_hit = get_cached_listing_bytes_any_flow(cache_id, cleaned)
+        if cache_hit is not None:
+            cached_bytes, hit_flow, hit_key = cache_hit
+            if hit_flow == "renovation":
+                cache_key = hit_key
+                staged_url = public_url_for_object_key(cache_key)
+                source = "s3_cache"
+            else:
+                staged_url = put_listing_image_cache(
+                    cache_id, cleaned, cached_bytes, flow="renovation"
+                )
+                cache_key = _cache_key(cache_id, cleaned, flow="renovation")
+                source = "s3_cache_shared"
+                if not staged_url:
+                    staged_url = public_url_for_object_key(hit_key)
+                    cache_key = hit_key
+                    source = "s3_cache"
             logger.info(
-                "Renovation listing image already in S3 cache property_id=%s key=%s",
+                "Renovation listing image S3 cache hit property_id=%s flow=%s key=%s",
                 cache_id,
+                hit_flow,
                 cache_key,
             )
             return ListingImageStageResult(
                 url=staged_url,
-                source="s3_cache",
+                source=source,
                 storage_key=cache_key,
             )
 
@@ -241,8 +268,34 @@ def stage_listing_image_for_renovation(
         )
 
     raise ValueError(
-        renovation_listing_download_error_message(resolved, image_url=cleaned)
-        + " Or send source_image_base64 (photo bytes from your app/browser) to stage without server download."
+        renovation_listing_staging_error_message(
+            resolved,
+            image_url=cleaned,
+            property_id=cache_id,
+        )
+    )
+
+
+def renovation_listing_staging_error_message(
+    resolved: ListingImageResolveResult,
+    *,
+    image_url: str,
+    property_id: str,
+) -> str:
+    base = renovation_listing_download_error_message(resolved, image_url=image_url)
+    pid = (property_id or "").strip() or extract_property_id_from_listing_url(image_url) or "unknown"
+    public_base = (settings.STORAGE_PUBLIC_BASE_URL or "").strip() or "(set STORAGE_PUBLIC_BASE_URL)"
+    return (
+        f"{base} "
+        f"Effective property_id={pid}. "
+        f"No S3 cache found for this image_url yet. "
+        f"On Railway, Cotality blocks server download — use one of: "
+        f"(1) POST with source_image_base64 from your app, "
+        f"(2) run once locally with the same STORAGE_* to warm cache at "
+        f"renovation/listings/{pid}/<hash>.jpg, "
+        f"(3) set TRESTLE_HTTP_PROXY, "
+        f"(4) pass image_url already on {public_base}. "
+        f"Referer/proxy env vars do not bypass Incapsula when the OAuth token endpoint is blocked."
     )
 
 
