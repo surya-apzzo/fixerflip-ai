@@ -35,5 +35,20 @@ class ConditionScoreResponse(BaseModel):
         ge=0,
         description="Extra photos skipped because the same room_type was already represented.",
     )
+    urls_received: int = Field(
+        default=0,
+        ge=0,
+        description="Non-empty image_urls in the request body.",
+    )
+    urls_processed: int = Field(
+        default=0,
+        ge=0,
+        description="URLs actually downloaded/CLIP'd (after CONDITION_SCORE_MAX_INPUT_URLS sampling).",
+    )
+    urls_truncated: int = Field(
+        default=0,
+        ge=0,
+        description="URLs skipped because the feed exceeded CONDITION_SCORE_MAX_INPUT_URLS.",
+    )
     cost_usd: float = Field(ge=0)
 

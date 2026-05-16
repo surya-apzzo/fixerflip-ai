@@ -23,7 +23,10 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
     image_urls = [u.strip() for u in payload.image_urls if u and u.strip()]
     filter_result = classify_and_filter_urls(image_urls, property_id=payload.property_id)
     selected = filter_result["selected"]
-    total_input = int(filter_result.get("total_input", len(image_urls)))
+    urls_received = int(filter_result.get("urls_received", len(image_urls)))
+    urls_processed = int(filter_result.get("urls_processed", len(image_urls)))
+    urls_truncated = int(filter_result.get("urls_truncated", 0))
+    total_input = int(filter_result.get("total_input", urls_processed))
     discarded_count = int(filter_result.get("discarded_count", 0))
     download_failures = int(filter_result.get("download_failures", 0))
     waf_blocked = bool(filter_result.get("waf_blocked", False))
@@ -159,5 +162,8 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
         images_discarded=discarded_count,
         images_after_filter=images_after_filter,
         images_deduplicated=images_deduplicated,
+        urls_received=urls_received,
+        urls_processed=urls_processed,
+        urls_truncated=urls_truncated,
         cost_usd=final["cost_usd"],
     )

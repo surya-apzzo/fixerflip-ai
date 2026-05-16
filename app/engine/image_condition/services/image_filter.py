@@ -3,12 +3,14 @@ from __future__ import annotations
 import io
 import logging
 import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 
 from PIL import Image
 
+from app.core.config import settings
 from app.core.image_bytes import is_valid_image_bytes
-from app.services.listing_image_storage import resolve_listing_image_bytes
+from app.services.listing_image_storage import ListingImageResolveResult, resolve_listing_image_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -231,6 +233,41 @@ def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | 
         return None
 
 
+def sample_urls_evenly(urls: list[str], limit: int) -> list[str]:
+    """Spread picks across the full listing (first, middle, last) when URLs exceed the cap."""
+    if limit <= 0 or not urls:
+        return []
+    if len(urls) <= limit:
+        return list(urls)
+    if limit == 1:
+        return [urls[0]]
+    last = len(urls) - 1
+    indices = sorted({int(round(i * last / (limit - 1))) for i in range(limit)})
+    return [urls[i] for i in indices]
+
+
+def prepare_condition_score_urls(image_urls: list[str]) -> tuple[list[str], int, int]:
+    """
+    Normalize URL list and apply CONDITION_SCORE_MAX_INPUT_URLS.
+
+    Returns (urls_to_process, urls_received, urls_truncated).
+    """
+    cleaned = [u.strip() for u in image_urls if u and u.strip()]
+    received = len(cleaned)
+    cap = max(6, int(settings.CONDITION_SCORE_MAX_INPUT_URLS))
+    if received <= cap:
+        return cleaned, received, 0
+    sampled = sample_urls_evenly(cleaned, cap)
+    truncated = received - len(sampled)
+    logger.info(
+        "condition-score: %s image_urls received, processing %s (even sample; %s skipped)",
+        received,
+        len(sampled),
+        truncated,
+    )
+    return sampled, received, truncated
+
+
 def deduplicate_filtered_by_room_type(
     images: list[FilteredImage],
 ) -> tuple[list[FilteredImage], int]:
@@ -298,17 +335,30 @@ def deduplicate_filtered_by_room_type(
     return unique, skipped
 
 
+def _resolve_listing_url(url: str, *, property_id: str) -> tuple[str, ListingImageResolveResult]:
+    cleaned = (url or "").strip()
+    return cleaned, resolve_listing_image_bytes(
+        cleaned,
+        property_id=property_id,
+        flow="condition_score",
+    )
+
+
 def classify_and_filter_urls(
     image_urls: list[str],
     *,
     property_id: str = "",
 ) -> dict[str, object]:
-    """Download each URL (S3 cache / storage URL / HTTP), run CLIP, keep house photos only."""
-    if not image_urls:
+    """Download each URL (parallel), run CLIP, keep house photos only."""
+    urls_to_process, urls_received, urls_truncated = prepare_condition_score_urls(image_urls)
+    if not urls_to_process:
         return {
             "selected": [],
             "discarded_count": 0,
             "total_input": 0,
+            "urls_received": urls_received,
+            "urls_processed": 0,
+            "urls_truncated": urls_truncated,
             "download_failures": 0,
             "waf_blocked": False,
             "clip_available": clip_available(),
@@ -318,18 +368,31 @@ def classify_and_filter_urls(
     discarded_count = 0
     download_failures = 0
     waf_blocked = False
+    workers = max(1, int(settings.CONDITION_SCORE_DOWNLOAD_CONCURRENCY))
 
-    for url in image_urls:
-        cleaned = (url or "").strip()
+    resolved_rows: list[tuple[str, ListingImageResolveResult]] = []
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(_resolve_listing_url, url, property_id=property_id): url
+            for url in urls_to_process
+        }
+        for future in as_completed(futures):
+            try:
+                resolved_rows.append(future.result())
+            except Exception as exc:
+                failed_url = futures[future]
+                logger.warning("condition-score resolve failed for %s: %s", failed_url[:120], exc)
+                resolved_rows.append(
+                    (
+                        failed_url,
+                        ListingImageResolveResult(content=None, source="resolve_error"),
+                    )
+                )
+
+    for cleaned, resolved in resolved_rows:
         if not cleaned:
             discarded_count += 1
             continue
-
-        resolved = resolve_listing_image_bytes(
-            cleaned,
-            property_id=property_id,
-            flow="condition_score",
-        )
         if resolved.waf_blocked:
             waf_blocked = True
         downloaded = resolved.content
@@ -346,7 +409,10 @@ def classify_and_filter_urls(
     return {
         "selected": selected,
         "discarded_count": discarded_count,
-        "total_input": len(image_urls),
+        "total_input": len(urls_to_process),
+        "urls_received": urls_received,
+        "urls_processed": len(urls_to_process),
+        "urls_truncated": urls_truncated,
         "download_failures": download_failures,
         "waf_blocked": waf_blocked,
         "clip_available": clip_available(),

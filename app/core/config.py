@@ -83,6 +83,21 @@ class Settings(BaseSettings):
         le=20,
         description="Max images per OpenAI vision request in condition-score (lower = faster, more reliable).",
     )
+    CONDITION_SCORE_MAX_INPUT_URLS: int = Field(
+        default=60,
+        ge=6,
+        le=200,
+        description=(
+            "Max listing URLs to download/CLIP per request. Larger feeds are evenly sampled "
+            "(e.g. 30+ or 100 photos). Vision still uses at most one photo per room (~6)."
+        ),
+    )
+    CONDITION_SCORE_DOWNLOAD_CONCURRENCY: int = Field(
+        default=8,
+        ge=1,
+        le=32,
+        description="Parallel workers when resolving many condition-score image URLs.",
+    )
     OPENAI_CONDITION_SCORE_VISION_MAX_RETRIES: int = Field(
         default=1,
         ge=0,
