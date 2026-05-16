@@ -565,6 +565,7 @@ def validate_and_normalize_renovation_payload(
     )
     normalized = payload.model_copy(
         update={
+            "property_id": _normalize_optional_string(payload.property_id),
             "image_url": _normalize_optional_string(payload.image_url),
             "zip_code": _normalize_optional_string(payload.zip_code),
             "listing_description": _normalize_optional_string(payload.listing_description),

@@ -31,7 +31,6 @@ _BROWSER_USER_AGENT = (
 
 _BUILTIN_PROXY_TEMPLATES: tuple[str, ...] = (
     "https://images.weserv.nl/?url={url_no_scheme_encoded}",
-    "https://wsrv.nl/?url={url_full_encoded}",
 )
 
 # Hosts that reject generic server clients unless Referer matches the portal.

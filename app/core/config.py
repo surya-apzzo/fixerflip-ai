@@ -199,6 +199,10 @@ class Settings(BaseSettings):
         default="condition-score/listings",
         description="S3 key prefix for cached MLS listing photos used by POST /condition-score.",
     )
+    STORAGE_RENOVATION_LISTING_IMAGE_PREFIX: str = Field(
+        default="renovation/listings",
+        description="S3 key prefix for cached MLS photos used by POST /renovation/estimate (vision + image edit).",
+    )
     STORAGE_PRESIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
     # Railway Object Storage (t3.storageapi.dev) requires virtual-hosted-style; MinIO often uses path.
     STORAGE_S3_ADDRESSING_STYLE: str = Field(
@@ -346,6 +350,7 @@ class Settings(BaseSettings):
         "STORAGE_PUBLIC_BASE_URL",
         "STORAGE_RENOVATED_IMAGE_PREFIX",
         "STORAGE_CONDITION_SCORE_IMAGE_PREFIX",
+        "STORAGE_RENOVATION_LISTING_IMAGE_PREFIX",
         mode="before",
     )
     @classmethod

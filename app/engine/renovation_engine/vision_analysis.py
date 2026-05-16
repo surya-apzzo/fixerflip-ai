@@ -68,7 +68,11 @@ async def _wait_for_retry_backoff(attempt: int) -> None:
     await asyncio.sleep(_VISION_RETRY_BACKOFF_SECONDS * (2**attempt))
 
 
-async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | None, str | None, str | None]:
+async def _analyze_single_image_url(
+    image_url: str,
+    *,
+    property_id: str = "",
+) -> tuple[RoomDetection | None, str | None, str | None]:
     """One image URL -> structured room detection via OpenAI."""
     if not (settings.OPENAI_VISION_ENABLED and settings.OPENAI_API_KEY):
         return None, _VISION_DISABLED_REASON, None
@@ -80,7 +84,7 @@ async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | Non
         model_candidates.append(fallback_model)
     try:
         prompt = _load_condition_prompt()
-        image_for_model = await image_url_as_openai_vision_payload(image_url)
+        image_for_model = await image_url_as_openai_vision_payload(image_url, property_id=property_id)
         client = AsyncOpenAI(
             api_key=settings.OPENAI_API_KEY,
             timeout=_OPENAI_VISION_TIMEOUT_SECONDS,
@@ -132,14 +136,18 @@ async def _analyze_single_image_url(image_url: str) -> tuple[RoomDetection | Non
         return None, _VISION_REQUEST_FAILED_REASON, primary_model
 
 
-async def analyze_renovation_image_url(image_url: str) -> ImageConditionResult:
+async def analyze_renovation_image_url(
+    image_url: str,
+    *,
+    property_id: str = "",
+) -> ImageConditionResult:
     """Single image URL -> condition result (renovation flow uses one image at a time)."""
     url = (image_url or "").strip()
     if not url:
         return _build_fallback_condition_result(_VISION_EMPTY_IMAGE_URL_REASON)
 
     engine = ImageConditionEngine()
-    one, fallback_reason, model_name = await _analyze_single_image_url(url)
+    one, fallback_reason, model_name = await _analyze_single_image_url(url, property_id=property_id)
     if one is not None:
         return engine.score_from_room_detections([one]).model_copy(
             update={

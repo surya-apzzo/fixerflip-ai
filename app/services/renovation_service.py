@@ -98,7 +98,10 @@ async def _resolve_image_condition(
     pipeline_warnings: list[str],
 ) -> ImageConditionResult:
     try:
-        return await analyze_renovation_image_url(payload.image_url)
+        return await analyze_renovation_image_url(
+            payload.image_url,
+            property_id=payload.property_id,
+        )
     except Exception as vision_exc:
         logger.warning("Renovation vision analysis failed: %s", vision_exc)
         pipeline_warnings.append(
@@ -155,7 +158,10 @@ async def _enforce_repair_only_guardrail(
         return candidate_url
 
     try:
-        edited_condition = await analyze_renovation_image_url(candidate_url)
+        edited_condition = await analyze_renovation_image_url(
+            candidate_url,
+            property_id=payload.property_id,
+        )
     except Exception as edited_analysis_exc:
         logger.warning("Edited image validation failed: %s", edited_analysis_exc)
         return candidate_url
@@ -181,12 +187,16 @@ async def _enforce_repair_only_guardrail(
             image_url=payload.image_url,
             instruction=strict_retry_instruction,
             reference_image_url="",
+            property_id=payload.property_id,
         )
         retry_url = await upload_base64_image_to_bucket(
             image_base64=retry_edit_result.image_base64,
             media_type=retry_edit_result.media_type,
         )
-        retry_condition = await analyze_renovation_image_url(retry_url)
+        retry_condition = await analyze_renovation_image_url(
+            retry_url,
+            property_id=payload.property_id,
+        )
     except Exception as retry_exc:
         logger.warning("Strict repair-only retry failed: %s", retry_exc)
         pipeline_warnings.append(
@@ -244,6 +254,7 @@ async def _generate_renovated_image_url(
             image_url=payload.image_url,
             instruction=instruction_for_edit,
             reference_image_url=payload.reference_image_url,
+            property_id=payload.property_id,
         )
     except Exception as edit_exc:
         logger.warning("Renovation image edit failed: %s", edit_exc)

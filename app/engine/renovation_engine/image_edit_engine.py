@@ -8,16 +8,16 @@ import math
 import re
 from io import BytesIO
 from pathlib import Path
-import httpx
 from openai import AsyncOpenAI
 
 from app.core import redis_cache
 from app.core.config import settings
-from app.core.image_download import (
-    build_image_download_headers,
-    build_proxy_image_urls,
-)
+from app.core.image_bytes import guess_image_media_type
 from app.schemas import ImageEditResult
+from app.services.listing_image_storage import (
+    renovation_listing_download_error_message,
+    resolve_listing_image_bytes_async,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -556,7 +556,7 @@ async def edit_property_image_from_url(
     image_url: str,
     instruction: str,
     reference_image_url: str = "",
-    preserve_elements: str | None = None,
+    property_id: str = "",
 ) -> ImageEditResult:
     if not settings.OPENAI_API_KEY:
         raise ValueError("OPENAI_API_KEY is required for image edits.")
@@ -566,14 +566,13 @@ async def edit_property_image_from_url(
         raise ValueError("instruction is required.")
 
     try:
-        image_bytes, media_type = await _download_source_image(image_url.strip())
+        image_bytes, media_type = await _download_source_image(
+            image_url.strip(),
+            property_id=property_id,
+        )
     except Exception as exc:
         logger.warning("Source image download failed for edit (url=%s): %s", image_url, exc)
-        raise ValueError(
-            "Image URL could not be downloaded for structure-preserving edit. "
-            "Check that the URL is public/reachable, or configure RENOVATION_IMAGE_DOWNLOAD_REFERER / "
-            "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
-        ) from exc
+        raise ValueError(str(exc)) from exc
 
     image_files: list[tuple[str, bytes, str]] = [
         (_guess_image_filename(media_type, role="property_image"), image_bytes, media_type),
@@ -581,24 +580,22 @@ async def edit_property_image_from_url(
     ref_url = (reference_image_url or "").strip()
     if ref_url:
         try:
-            ref_bytes, ref_media = await _download_source_image(ref_url)
+            ref_bytes, ref_media = await _download_source_image(
+                ref_url,
+                property_id=property_id,
+            )
             image_files.append(
                 (_guess_image_filename(ref_media, role="reference_image"), ref_bytes, ref_media)
             )
         except Exception as exc:
             logger.warning("Reference image download failed for edit (url=%s): %s", ref_url, exc)
-            raise ValueError(
-                "Reference image URL could not be downloaded. "
-                "Check that the URL is public/reachable, or configure RENOVATION_IMAGE_DOWNLOAD_REFERER / "
-                "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE for blocked CDNs."
-            ) from exc
+            raise ValueError(str(exc)) from exc
 
     reference_attached = len(image_files) > 1
     prompt_template = _load_edit_prompt_text()
-    constraints = (
-        preserve_elements.strip()
-        if preserve_elements is not None
-        else _select_constraints_for_instruction(instruction.strip(), reference_attached=reference_attached)
+    constraints = _select_constraints_for_instruction(
+        instruction.strip(),
+        reference_attached=reference_attached,
     )
     if reference_attached:
         prompt = (
@@ -672,7 +669,8 @@ async def edit_property_image_from_url(
     raise ValueError("Image edit request failed.") from last_exc
 
 
-async def _download_source_image(image_url: str) -> tuple[bytes, str]:
+async def _download_source_image(image_url: str, *, property_id: str = "") -> tuple[bytes, str]:
+    """Renovation flow: S3 cache + Trestle Bearer (shared with listing_image_storage)."""
     cached = redis_cache.get_cached_image_download(
         image_url,
         ttl_seconds=IMAGE_CACHE_TTL_SECONDS,
@@ -681,64 +679,28 @@ async def _download_source_image(image_url: str) -> tuple[bytes, str]:
     if cached is not None:
         return cached
 
-    try:
-        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-            response = await client.get(
-                image_url, headers=build_image_download_headers(image_url, flow="renovation")
-            )
-            response.raise_for_status()
-    except httpx.HTTPStatusError as exc:
-        status = exc.response.status_code if exc.response is not None else "unknown"
-        proxy_urls = build_proxy_image_urls(image_url, flow="renovation")
-        if proxy_urls and status in (401, 403):
-            try:
-                last_proxy_exc: Exception | None = None
-                for proxy_url in proxy_urls:
-                    try:
-                        async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as client:
-                            response = await client.get(
-                                proxy_url,
-                                headers=build_image_download_headers(image_url, flow="renovation"),
-                            )
-                            response.raise_for_status()
-                        break
-                    except Exception as proxy_exc:
-                        last_proxy_exc = proxy_exc
-                        continue
-                else:
-                    raise last_proxy_exc or ValueError("Unknown proxy download failure")
-            except Exception as proxy_exc:
-                raise ValueError(
-                    f"Image URL could not be downloaded (HTTP {status}), and proxy fallback failed: {proxy_exc}"
-                ) from proxy_exc
-        else:
-            raise ValueError(
-                f"Image URL could not be downloaded (HTTP {status}). "
-                "Some CDNs block non-browser clients; configure RENOVATION_IMAGE_DOWNLOAD_REFERER "
-                "or RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE."
-            ) from exc
-    except httpx.HTTPError as exc:
-        raise ValueError(
-            "Image URL could not be downloaded. "
-            "Check that the URL is public and reachable."
-        ) from exc
+    resolved = await resolve_listing_image_bytes_async(
+        image_url,
+        property_id=property_id,
+        flow="renovation",
+    )
+    if resolved.content is None or len(resolved.content) > 20 * 1024 * 1024:
+        if resolved.content is not None:
+            raise ValueError("Image is too large. Max supported size is 20MB.")
+        raise ValueError(renovation_listing_download_error_message(resolved, image_url=image_url))
 
-    media_type = response.headers.get("content-type", "image/png").split(";")[0].strip() or "image/png"
-    if not media_type.startswith("image/"):
-        raise ValueError("URL did not return an image.")
-    if len(response.content) > 20 * 1024 * 1024:
-        raise ValueError("Image is too large. Max supported size is 20MB.")
+    media_type = guess_image_media_type(resolved.content)
     redis_cache.set_cached_image_download(
         image_url,
-        content=response.content,
+        content=resolved.content,
         media_type=media_type,
         ttl_seconds=IMAGE_CACHE_TTL_SECONDS,
         cache_dir=IMAGE_CACHE_DIR,
     )
-    return response.content, media_type
+    return resolved.content, media_type
 
 
-async def image_url_as_openai_vision_payload(image_url: str) -> str:
+async def image_url_as_openai_vision_payload(image_url: str, *, property_id: str = "") -> str:
     """
     Prefer a data URL for OpenAI vision so their servers do not fetch the URL.
 
@@ -749,6 +711,6 @@ async def image_url_as_openai_vision_payload(image_url: str) -> str:
     url = (image_url or "").strip()
     if not url:
         return ""
-    image_bytes, media_type = await _download_source_image(url)
+    image_bytes, media_type = await _download_source_image(url, property_id=property_id)
     b64 = base64.b64encode(image_bytes).decode("ascii")
     return f"data:{media_type};base64,{b64}"
