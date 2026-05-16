@@ -1,8 +1,19 @@
 from __future__ import annotations
 
-from pydantic import BaseModel, Field
+from typing import Any
+
+from pydantic import BaseModel, Field, model_validator
 
 from app.core.rules_config import DEFAULT_ADMIN_LABOR_INDEX, DEFAULT_ADMIN_MATERIAL_INDEX
+
+_BASE64_ALIASES = (
+    "source_image_base64",
+    "sourceImageBase64",
+    "image_base64",
+    "imageBase64",
+    "photo_base64",
+    "photoBase64",
+)
 
 
 class RenovationEstimateRequest(BaseModel):
@@ -41,3 +52,21 @@ class RenovationEstimateRequest(BaseModel):
     issues: list[str] = Field(default_factory=list)
     room_type: str = "unknown"
     user_inputs: str = ""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coalesce_mobile_image_fields(cls, data: Any) -> Any:
+        """Accept common mobile/Node field names for uploaded photo bytes."""
+        if not isinstance(data, dict):
+            return data
+        existing = (data.get("source_image_base64") or "").strip()
+        if existing:
+            return data
+        for key in _BASE64_ALIASES:
+            if key == "source_image_base64":
+                continue
+            raw = data.get(key)
+            if isinstance(raw, str) and raw.strip():
+                data = {**data, "source_image_base64": raw.strip()}
+                break
+        return data

@@ -7,6 +7,7 @@ import logging
 from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.core.image_bytes import is_valid_image_bytes
+from app.core.image_download import requires_client_image_upload
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
 from app.schemas.requests.condition import ImageConditionRequest
 from app.schemas.requests.renovation import RenovationEstimateRequest
@@ -209,32 +210,39 @@ async def renovation_estimate(request: Request) -> RenovationEstimateResponse:
         ) from exc
 
     image_url = (payload.image_url or "").strip()
-    needs_upload = bool(image_url) and not is_own_storage_url(image_url)
-    if (
-        needs_upload
+    needs_client_bytes = (
+        bool(image_url)
+        and not is_own_storage_url(image_url)
+        and requires_client_image_upload(image_url)
         and not (payload.source_image_base64 or "").strip()
-        and listing_image_storage_configured()
-    ):
+    )
+    if needs_client_bytes and listing_image_storage_configured():
         pid = resolve_effective_property_id(payload.property_id, image_url, flow="renovation")
         if get_cached_listing_bytes_any_flow(pid, image_url) is not None:
-            needs_upload = False
-    if needs_upload and not (payload.source_image_base64 or "").strip():
+            needs_client_bytes = False
+    if needs_client_bytes:
+        effective_pid = (
+            (payload.property_id or "").strip()
+            or extract_property_id_from_listing_url(image_url)
+            or None
+        )
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "LISTING_IMAGE_UPLOAD_REQUIRED",
                 "message": (
-                    "This image_url cannot be downloaded on the server (Cotality WAF / Cloudflare). "
-                    "Resend as multipart with source_image file, or include source_image_base64 in JSON."
+                    "This MLS/Cotality image_url cannot be downloaded on the server. "
+                    "The mobile app must send the photo as source_image_base64 (or image_base64) "
+                    "in the same JSON body, not only image_url."
                 ),
-                "effective_property_id": (
-                    (payload.property_id or "").strip()
-                    or extract_property_id_from_listing_url(image_url)
-                    or None
+                "effective_property_id": effective_pid,
+                "mobile_fix": (
+                    "1) Load image_url on the device. 2) Encode JPEG/PNG as base64. "
+                    "3) POST JSON with image_url + source_image_base64 + property_id."
                 ),
                 "hint": (
-                    "Postman: Body → form-data → payload (text JSON) + source_image (file). "
-                    "Same URL: POST /api/v1/renovation/estimate"
+                    "Node BFF: forward source_image_base64 from the app to POST /api/v1/renovation/estimate. "
+                    "Or use multipart: payload + source_image file."
                 ),
             },
         )

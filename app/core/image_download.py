@@ -113,6 +113,27 @@ def image_download_proxy_template(flow: ImageDownloadFlow) -> str:
     return (settings.IMAGE_DOWNLOAD_PROXY_TEMPLATE or "").strip()
 
 
+def requires_client_image_upload(image_url: str) -> bool:
+    """
+    True when the server (e.g. Railway) usually cannot download this URL; client must send bytes.
+
+    Public stock/CDN URLs are False — server download may still work.
+    """
+    cleaned = (image_url or "").strip()
+    if not cleaned:
+        return False
+    parsed = urlparse(cleaned)
+    host = (parsed.netloc or "").lower()
+    path = (parsed.path or "").lower()
+    if is_trestle_media_url(cleaned) or "cotality.com" in host:
+        return True
+    if "realty.dev" in host or "imagecdn" in host:
+        return True
+    if "mls_photos" in path and ("crmls" in path or "wirex" in path or "realty" in host):
+        return True
+    return False
+
+
 def image_download_config_summary(flow: ImageDownloadFlow) -> dict[str, Any]:
     """Non-secret snapshot for logs / API error meta (verify Railway env is loaded)."""
     referer = image_download_referer(flow)
