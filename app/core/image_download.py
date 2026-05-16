@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
 from typing import Any, Literal
 from urllib.parse import quote, urlparse
 
 import httpx
 
 from app.core.config import settings
+from app.core.cotality_waf import is_incapsula_waf_response
 from app.core.trestle_auth import (
     clear_trestle_token_cache,
     get_trestle_access_token,
@@ -49,6 +51,19 @@ _FLOW_PROXY_ENV: dict[ImageDownloadFlow, str] = {
     "renovation": "RENOVATION_IMAGE_DOWNLOAD_PROXY_TEMPLATE",
     "condition_score": "CONDITION_SCORE_IMAGE_DOWNLOAD_PROXY_TEMPLATE",
 }
+
+
+@dataclass(slots=True)
+class ListingImageDownloadOutcome:
+    content: bytes | None = None
+    http_status: int | None = None
+    waf_blocked: bool = False
+    bearer_sent: bool = False
+
+
+def _httpx_proxy() -> str | None:
+    proxy = (settings.TRESTLE_HTTP_PROXY or "").strip()
+    return proxy or None
 
 
 def _referer_for_image_host(host: str) -> str | None:
@@ -315,24 +330,40 @@ def _download_direct(
     timeout: float,
     attempt: str,
     force_refresh_trestle_token: bool = False,
-) -> tuple[bytes | None, int | None]:
-    """GET listing URL; returns (content, http_status_on_failure)."""
+) -> ListingImageDownloadOutcome:
+    """GET listing URL."""
     headers = build_image_download_headers(
         image_url,
         flow=flow,
         force_refresh_trestle_token=force_refresh_trestle_token,
     )
+    bearer_sent = headers.get("Authorization", "").startswith("Bearer ")
+    proxy = _httpx_proxy() if is_trestle_media_url(image_url) else None
     try:
         response = httpx.get(
             image_url,
             timeout=timeout,
             follow_redirects=True,
             headers=headers,
+            proxy=proxy,
         )
         response.raise_for_status()
-        return response.content, None
+        return ListingImageDownloadOutcome(
+            content=response.content,
+            bearer_sent=bearer_sent,
+        )
     except httpx.HTTPStatusError as exc:
         status = exc.response.status_code if exc.response is not None else None
+        waf_blocked = is_incapsula_waf_response(exc.response)
+        if waf_blocked:
+            logger.warning(
+                "Cotality Incapsula WAF blocked %s (flow=%s attempt=%s). "
+                "Cloud/datacenter IPs are often denied; stage photos to STORAGE_PUBLIC_BASE_URL "
+                "or ask Cotality to whitelist your host egress IP.",
+                image_url[:200],
+                flow,
+                attempt,
+            )
         _log_image_download_http_failure(
             image_url=image_url,
             flow=flow,
@@ -341,7 +372,11 @@ def _download_direct(
             request_headers=headers,
             exc=exc,
         )
-        return None, status
+        return ListingImageDownloadOutcome(
+            http_status=status,
+            waf_blocked=waf_blocked,
+            bearer_sent=bearer_sent,
+        )
     except Exception as exc:
         logger.warning(
             "Skipping image download for URL %s: %s | request_headers=%s",
@@ -349,54 +384,72 @@ def _download_direct(
             exc,
             _request_headers_for_log(headers),
         )
-        return None, None
+        return ListingImageDownloadOutcome(bearer_sent=bearer_sent)
 
 
-def download_listing_image_bytes(
+def download_listing_image_with_meta(
     image_url: str,
     *,
     flow: ImageDownloadFlow,
     timeout: float = 20.0,
-) -> bytes | None:
+) -> ListingImageDownloadOutcome:
     """Download one listing photo; Trestle URLs use OAuth Bearer when configured."""
     cleaned = (image_url or "").strip()
     if not cleaned:
-        return None
+        return ListingImageDownloadOutcome()
 
     trestle_url = is_trestle_media_url(cleaned)
-    content, status = _download_direct(
+    outcome = _download_direct(
         image_url=cleaned,
         flow=flow,
         timeout=timeout,
         attempt="direct",
     )
-    if content is not None:
-        return content
+    if outcome.content is not None:
+        return outcome
+
+    status = outcome.http_status
+    waf_blocked = outcome.waf_blocked
+    bearer_sent = outcome.bearer_sent
 
     if status == 401 and trestle_url and trestle_credentials_configured():
         clear_trestle_token_cache()
-        content, status = _download_direct(
+        retry = _download_direct(
             image_url=cleaned,
             flow=flow,
             timeout=timeout,
             attempt="direct_token_refresh",
             force_refresh_trestle_token=True,
         )
-        if content is not None:
-            return content
+        if retry.content is not None:
+            return retry
+        status = retry.http_status or status
+        waf_blocked = waf_blocked or retry.waf_blocked
+        bearer_sent = bearer_sent or retry.bearer_sent
 
     if status not in (401, 403):
-        return None
+        return ListingImageDownloadOutcome(
+            http_status=status,
+            waf_blocked=waf_blocked,
+            bearer_sent=bearer_sent,
+        )
 
     # Public proxies cannot forward Trestle Bearer auth to Cotality media URLs.
     if trestle_url and trestle_credentials_configured():
+        auth_note = "Bearer sent" if bearer_sent else "Bearer not obtained (token fetch failed)"
         logger.warning(
-            "Skipping image download for Trestle media URL %s: HTTP %s after Bearer auth (%s)",
+            "Skipping image download for Trestle media URL %s: HTTP %s (%s; waf_blocked=%s) %s",
             cleaned[:200],
             status,
+            auth_note,
+            waf_blocked,
             image_download_config_summary(flow),
         )
-        return None
+        return ListingImageDownloadOutcome(
+            http_status=status,
+            waf_blocked=waf_blocked,
+            bearer_sent=bearer_sent,
+        )
 
     proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
     headers = build_image_download_headers(cleaned, flow=flow)
@@ -408,7 +461,7 @@ def download_listing_image_bytes(
         headers=headers,
     )
     if content is not None:
-        return content
+        return ListingImageDownloadOutcome(content=content, bearer_sent=bearer_sent)
     logger.warning(
         "Skipping image download for URL %s: HTTP %s; direct + %s proxy URL(s) failed (%s)",
         cleaned[:200],
@@ -416,4 +469,17 @@ def download_listing_image_bytes(
         len(proxy_urls),
         image_download_config_summary(flow),
     )
-    return None
+    return ListingImageDownloadOutcome(
+        http_status=status,
+        waf_blocked=waf_blocked,
+        bearer_sent=bearer_sent,
+    )
+
+
+def download_listing_image_bytes(
+    image_url: str,
+    *,
+    flow: ImageDownloadFlow,
+    timeout: float = 20.0,
+) -> bytes | None:
+    return download_listing_image_with_meta(image_url, flow=flow, timeout=timeout).content

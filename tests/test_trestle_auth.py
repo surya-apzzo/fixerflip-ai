@@ -20,6 +20,7 @@ def test_trestle_token_cached(monkeypatch) -> None:
     ta.clear_trestle_token_cache()
 
     mock_resp = MagicMock()
+    mock_resp.status_code = 200
     mock_resp.raise_for_status = MagicMock()
     mock_resp.json.return_value = {"access_token": "tok-abc", "expires_in": 28800, "token_type": "Bearer"}
 

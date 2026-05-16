@@ -11,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import settings
+from app.core.cotality_waf import is_incapsula_waf_response
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +64,25 @@ def _fetch_trestle_access_token() -> tuple[str, float]:
         "grant_type": "client_credentials",
         "scope": (settings.TRESTLE_TOKEN_SCOPE or "api").strip() or "api",
     }
+    proxy = (settings.TRESTLE_HTTP_PROXY or "").strip() or None
     response = httpx.post(
         token_url,
         data=data,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={
+            "Content-Type": "application/x-www-form-urlencoded",
+            "Accept": "application/json",
+        },
         timeout=30.0,
+        proxy=proxy,
     )
+    status_code = int(getattr(response, "status_code", 0) or 0)
+    if status_code >= 400 and is_incapsula_waf_response(response):
+        raise httpx.HTTPStatusError(
+            "Cotality Incapsula WAF blocked Trestle token endpoint (datacenter IP?). "
+            "Stage listing photos to your S3 bucket or set TRESTLE_HTTP_PROXY / ask Cotality to whitelist egress IP.",
+            request=response.request,
+            response=response,
+        )
     response.raise_for_status()
     payload: dict[str, Any] = response.json()
     token = str(payload.get("access_token") or "").strip()
@@ -96,6 +110,16 @@ def get_trestle_access_token(*, force_refresh: bool = False) -> str | None:
 
     try:
         token, expires_at = _fetch_trestle_access_token()
+    except httpx.HTTPStatusError as exc:
+        if exc.response is not None and is_incapsula_waf_response(exc.response):
+            logger.warning(
+                "Trestle token blocked by Cotality Incapsula WAF url=%s (not invalid credentials). "
+                "Use S3-cached listing URLs, TRESTLE_HTTP_PROXY, or Cotality IP whitelist.",
+                trestle_token_url(),
+            )
+        else:
+            logger.warning("Trestle token request failed url=%s error=%s", trestle_token_url(), exc)
+        return None
     except Exception as exc:
         logger.warning(
             "Trestle token request failed url=%s error=%s",

@@ -7,7 +7,7 @@ from dataclasses import dataclass
 
 from PIL import Image
 
-from app.core.image_download import download_listing_image_bytes
+from app.services.listing_image_storage import resolve_listing_image_bytes
 
 logger = logging.getLogger(__name__)
 
@@ -228,14 +228,25 @@ def deduplicate_filtered_by_room_type(
     return unique, skipped
 
 
-def classify_and_filter_urls(image_urls: list[str]) -> dict[str, object]:
-    """Download each URL, run CLIP, and keep house/property photos only."""
+def classify_and_filter_urls(
+    image_urls: list[str],
+    *,
+    property_id: str = "",
+) -> dict[str, object]:
+    """Download each URL (S3 cache / storage URL / HTTP), run CLIP, keep house photos only."""
     if not image_urls:
-        return {"selected": [], "discarded_count": 0, "total_input": 0, "download_failures": 0}
+        return {
+            "selected": [],
+            "discarded_count": 0,
+            "total_input": 0,
+            "download_failures": 0,
+            "waf_blocked": False,
+        }
 
     selected: list[FilteredImage] = []
     discarded_count = 0
     download_failures = 0
+    waf_blocked = False
 
     for url in image_urls:
         cleaned = (url or "").strip()
@@ -243,7 +254,14 @@ def classify_and_filter_urls(image_urls: list[str]) -> dict[str, object]:
             discarded_count += 1
             continue
 
-        downloaded = download_listing_image_bytes(cleaned, flow="condition_score")
+        resolved = resolve_listing_image_bytes(
+            cleaned,
+            property_id=property_id,
+            flow="condition_score",
+        )
+        if resolved.waf_blocked:
+            waf_blocked = True
+        downloaded = resolved.content
         if downloaded is None:
             download_failures += 1
             discarded_count += 1
@@ -259,5 +277,6 @@ def classify_and_filter_urls(image_urls: list[str]) -> dict[str, object]:
         "discarded_count": discarded_count,
         "total_input": len(image_urls),
         "download_failures": download_failures,
+        "waf_blocked": waf_blocked,
     }
 

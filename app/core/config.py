@@ -136,6 +136,10 @@ class Settings(BaseSettings):
         default="api",
         description="OAuth2 scope for client_credentials grant.",
     )
+    TRESTLE_HTTP_PROXY: str = Field(
+        default="",
+        description="Optional HTTP(S) proxy for Trestle token + media (if Cotality blocks datacenter IPs).",
+    )
 
     STORAGE_ENDPOINT_URL: str = ""
     STORAGE_REGION: str = "auto"
@@ -158,6 +162,10 @@ class Settings(BaseSettings):
         ),
     )
     STORAGE_RENOVATED_IMAGE_PREFIX: str = "renovated"
+    STORAGE_CONDITION_SCORE_IMAGE_PREFIX: str = Field(
+        default="condition-score/listings",
+        description="S3 key prefix for cached MLS listing photos used by POST /condition-score.",
+    )
     STORAGE_PRESIGNED_URL_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
     # Railway Object Storage (t3.storageapi.dev) requires virtual-hosted-style; MinIO often uses path.
     STORAGE_S3_ADDRESSING_STYLE: str = Field(
@@ -274,6 +282,7 @@ class Settings(BaseSettings):
         "TRESTLE_CLIENT_SECRET",
         "TRESTLE_TOKEN_PATH",
         "TRESTLE_TOKEN_SCOPE",
+        "TRESTLE_HTTP_PROXY",
         mode="before",
     )
     @classmethod
@@ -303,6 +312,7 @@ class Settings(BaseSettings):
         "STORAGE_SECRET_ACCESS_KEY",
         "STORAGE_PUBLIC_BASE_URL",
         "STORAGE_RENOVATED_IMAGE_PREFIX",
+        "STORAGE_CONDITION_SCORE_IMAGE_PREFIX",
         mode="before",
     )
     @classmethod

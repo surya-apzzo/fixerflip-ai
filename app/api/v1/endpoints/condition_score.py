@@ -20,16 +20,37 @@ router = APIRouter()
 @router.post("/condition-score", response_model=ConditionScoreResponse)
 async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreResponse:
     image_urls = [u.strip() for u in payload.image_urls if u and u.strip()]
-    filter_result = classify_and_filter_urls(image_urls)
+    filter_result = classify_and_filter_urls(image_urls, property_id=payload.property_id)
     selected = filter_result["selected"]
     total_input = int(filter_result.get("total_input", len(image_urls)))
     discarded_count = int(filter_result.get("discarded_count", 0))
     download_failures = int(filter_result.get("download_failures", 0))
+    waf_blocked = bool(filter_result.get("waf_blocked", False))
 
     images_after_filter = len(selected)
     selected, images_deduplicated = deduplicate_filtered_by_room_type(selected)
 
     if total_input > 0 and not selected:
+        if waf_blocked and download_failures >= total_input:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "COTALITY_WAF_BLOCKED",
+                    "message": (
+                        "Cotality blocked listing photo and OAuth requests from this server's IP "
+                        "(Incapsula WAF). Trestle credentials are set but the token endpoint returned 403 HTML. "
+                        "Fix options: (1) pass image_urls on your STORAGE_PUBLIC_BASE_URL after uploading photos "
+                        "from a network Cotality allows, (2) set TRESTLE_HTTP_PROXY to an allowed egress proxy, "
+                        "(3) ask Cotality to whitelist your Railway/static egress IP."
+                    ),
+                    "meta": {
+                        "total_input": total_input,
+                        "images_discarded": discarded_count,
+                        "download_failures": download_failures,
+                        "download_config": image_download_config_summary("condition_score"),
+                    },
+                },
+            )
         if download_failures >= total_input:
             raise HTTPException(
                 status_code=422,
@@ -38,8 +59,8 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                     "message": (
                         "Could not download listing photo URLs. For Cotality/Trestle "
                         "(api.cotality.com/trestle/Media/...) set TRESTLE_CLIENT_ID, "
-                        "TRESTLE_CLIENT_SECRET, and TRESTLE_BASE_URL so downloads use OAuth Bearer "
-                        "auth; otherwise re-host photos on your S3/CDN."
+                        "TRESTLE_CLIENT_SECRET, and TRESTLE_BASE_URL, or use URLs on your S3/CDN "
+                        "(STORAGE_PUBLIC_BASE_URL)."
                     ),
                     "meta": {
                         "total_input": total_input,
