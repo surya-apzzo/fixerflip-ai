@@ -52,8 +52,19 @@ NON_PROPERTY_LABELS: frozenset[str] = frozenset(
     }
 )
 
-# Minimum CLIP probability on a house label to keep an ambiguous image.
-_MIN_HOUSE_LABEL_PROBABILITY = 0.12
+# Absolute floor: below this, CLIP has no meaningful house signal (do not fallback-keep).
+_CLIP_HOUSE_SIGNAL_FLOOR = 0.02
+# Drop only when a non-property label clearly beats the best house label.
+_NON_PROPERTY_MIN_CONFIDENCE = 0.20
+_NON_PROPERTY_MARGIN_OVER_HOUSE = 0.05
+
+
+def _min_house_label_probability() -> float:
+    return float(settings.CONDITION_SCORE_CLIP_MIN_HOUSE_PROB)
+
+
+def _clip_min_photos_target() -> int:
+    return max(1, int(settings.CONDITION_SCORE_CLIP_MIN_PHOTOS))
 
 ALL_LABELS = [*HOUSE_ROOM_LABELS, *sorted(NON_PROPERTY_LABELS)]
 HOUSE_LABEL_INDICES = [ALL_LABELS.index(label) for label in HOUSE_ROOM_LABELS]
@@ -166,46 +177,106 @@ def _heuristic_home_image(url: str) -> bool:
     return not any(term in lowered for term in discard_terms)
 
 
-def _ranked_house_labels(probs) -> list[tuple[str, float]]:
-    """House labels for one photo, highest softmax probability first."""
-    pairs = [(ALL_LABELS[i], float(probs[i].item())) for i in HOUSE_LABEL_INDICES]
+def _label_score(probs, index: int) -> float:
+    return float(probs[index].item())
+
+
+def _best_label_in_indices(probs, indices: list[int]) -> tuple[str, float]:
+    best_idx = max(indices, key=lambda i: _label_score(probs, i))
+    return ALL_LABELS[best_idx], _label_score(probs, best_idx)
+
+
+def _all_ranked_house_labels(probs) -> list[tuple[str, float]]:
+    """All house labels for one photo, highest softmax probability first."""
+    pairs = [(ALL_LABELS[i], _label_score(probs, i)) for i in HOUSE_LABEL_INDICES]
     pairs.sort(key=lambda row: -row[1])
-    return [(label, conf) for label, conf in pairs if conf >= _MIN_HOUSE_LABEL_PROBABILITY]
+    return pairs
 
 
-def _best_house_label(probs) -> tuple[str, float] | None:
-    """Best-scoring house label, or None if nothing crosses the keep threshold."""
-    ranked = _ranked_house_labels(probs)
-    if not ranked:
-        return None
-    return ranked[0]
+def _house_rankings_for_photo(probs) -> tuple[tuple[str, float], ...]:
+    """Ranked house labels stored on FilteredImage (used by room dedupe)."""
+    return tuple(
+        (label, conf)
+        for label, conf in _all_ranked_house_labels(probs)
+        if conf >= _CLIP_HOUSE_SIGNAL_FLOOR
+    )
+
+
+def select_filtered_images(
+    strict: list[FilteredImage],
+    weak: list[FilteredImage],
+    *,
+    min_photos: int | None = None,
+) -> list[FilteredImage]:
+    """
+    Keep strict CLIP passes; if too few, add best weak house-scored MLS photos.
+
+    Real listing interiors often score 0.04–0.06 on house labels (16-way softmax) — still
+  valid house photos, just below a high fixed threshold.
+    """
+    goal = min_photos if min_photos is not None else _clip_min_photos_target()
+    goal = min(goal, len(strict) + len(weak))
+    selected = list(strict)
+    if len(selected) >= goal:
+        return selected
+    seen = {img.image_url for img in selected}
+    for img in sorted(weak, key=lambda row: -float(row.confidence)):
+        if len(selected) >= goal:
+            break
+        if img.image_url in seen:
+            continue
+        selected.append(img)
+        seen.add(img.image_url)
+    return selected
 
 
 def _is_non_property_image(probs) -> bool:
-    """True when the strongest CLIP label is explicitly non-property."""
-    best_idx = int(probs.argmax().item())
-    return best_idx in NON_PROPERTY_LABEL_INDICES
+    """
+    True when a non-property label clearly beats every house label.
+
+    Do not use global argmax over all 16 labels — with ViT-B/32 softmax, a pool or
+    garage label can edge out kitchen/bedroom by 0.01 and wrongly discard MLS photos.
+    """
+    best_house_label, house_conf = _best_label_in_indices(probs, HOUSE_LABEL_INDICES)
+    best_non_label, non_conf = _best_label_in_indices(probs, list(NON_PROPERTY_LABEL_INDICES))
+    if non_conf >= _NON_PROPERTY_MIN_CONFIDENCE and non_conf > house_conf + _NON_PROPERTY_MARGIN_OVER_HOUSE:
+        logger.debug(
+            "CLIP non-property discard: %s=%.3f vs best house %s=%.3f",
+            best_non_label,
+            non_conf,
+            best_house_label,
+            house_conf,
+        )
+        return True
+    return False
 
 
-def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | None:
+def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> tuple[FilteredImage | None, str]:
+    """
+    Classify image bytes. Second value is discard reason when None:
+    invalid_bytes | non_property | weak_house | clip_error | heuristic_reject
+    """
     if not is_valid_image_bytes(image_bytes):
         logger.warning("Bytes are not a valid image (HTML/WAF page?) for %s", source[:100])
-        return None
+        return None, "invalid_bytes"
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception as exc:
         logger.warning("Invalid image bytes for %s: %s", source[:100], exc)
-        return None
+        return None, "invalid_bytes"
 
     if not _load_clip():
         if _heuristic_home_image(source):
-            return FilteredImage(
-                image_url=source,
-                room_type="unknown",
-                confidence=0.5,
-                image_bytes=image_bytes,
+            return (
+                FilteredImage(
+                    image_url=source,
+                    room_type="unknown",
+                    confidence=0.5,
+                    image_bytes=image_bytes,
+                ),
+                "",
             )
-        return None
+        return None, "heuristic_reject"
 
     text_tokens = _clip_tokenize(ALL_LABELS)
     try:
@@ -214,23 +285,31 @@ def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | 
             logits, _ = _clip_model(tensor, text_tokens)
             probs = logits.softmax(dim=-1)[0]
         if _is_non_property_image(probs):
-            logger.debug("Discarded non-property image (CLIP): %s", source[:100])
-            return None
-        rankings = _ranked_house_labels(probs)
-        if not rankings:
-            logger.debug("Discarded image with no confident house label: %s", source[:100])
-            return None
-        room_type, confidence = rankings[0]
-        return FilteredImage(
+            return None, "non_property"
+        all_rankings = _all_ranked_house_labels(probs)
+        room_type, confidence = all_rankings[0]
+        rankings = _house_rankings_for_photo(probs)
+        if confidence < _CLIP_HOUSE_SIGNAL_FLOOR:
+            logger.debug(
+                "Discarded image with no house CLIP signal (%s=%.3f) for %s",
+                room_type,
+                confidence,
+                source[:100],
+            )
+            return None, "weak_house"
+        row = FilteredImage(
             image_url=source,
             room_type=room_type,
             confidence=confidence,
             image_bytes=image_bytes,
-            room_rankings=tuple(rankings),
+            room_rankings=rankings,
         )
+        if confidence >= _min_house_label_probability():
+            return row, ""
+        return row, "weak_house"
     except Exception as exc:
         logger.warning("CLIP classification skipped for %s: %s", source[:100], exc)
-        return None
+        return None, "clip_error"
 
 
 def sample_urls_evenly(urls: list[str], limit: int) -> list[str]:
@@ -364,10 +443,13 @@ def classify_and_filter_urls(
             "clip_available": clip_available(),
         }
 
-    selected: list[FilteredImage] = []
-    discarded_count = 0
+    strict: list[FilteredImage] = []
+    weak: list[FilteredImage] = []
     download_failures = 0
     waf_blocked = False
+    discard_invalid_bytes = 0
+    discard_clip_non_property = 0
+    discard_clip_weak_house = 0
     workers = max(1, int(settings.CONDITION_SCORE_DOWNLOAD_CONCURRENCY))
 
     resolved_rows: list[tuple[str, ListingImageResolveResult]] = []
@@ -391,24 +473,63 @@ def classify_and_filter_urls(
 
     for cleaned, resolved in resolved_rows:
         if not cleaned:
-            discarded_count += 1
             continue
         if resolved.waf_blocked:
             waf_blocked = True
         downloaded = resolved.content
         if downloaded is None:
             download_failures += 1
-            discarded_count += 1
             continue
-        row = _clip_classify_bytes(downloaded, source=cleaned)
+        row, discard_reason = _clip_classify_bytes(downloaded, source=cleaned)
         if row is None:
-            discarded_count += 1
+            if discard_reason == "invalid_bytes":
+                discard_invalid_bytes += 1
+            elif discard_reason == "non_property":
+                discard_clip_non_property += 1
+            elif discard_reason in ("weak_house", "clip_error", "heuristic_reject"):
+                discard_clip_weak_house += 1
+            continue
+        if discard_reason == "weak_house":
+            weak.append(row)
         else:
-            selected.append(row)
+            strict.append(row)
+
+    selected = select_filtered_images(strict, weak)
+    fallback_added = max(0, len(selected) - len(strict))
+    discard_clip_weak_house += max(0, len(weak) - fallback_added)
+    discarded_count = len(urls_to_process) - len(selected)
+
+    if urls_to_process:
+        logger.info(
+            "condition-score filter: %s urls -> %s kept (%s strict, %s fallback, min_house_prob=%.2f) | "
+            "discarded: invalid=%s non_property=%s weak_house=%s download_fail=%s",
+            len(urls_to_process),
+            len(selected),
+            len(strict),
+            fallback_added,
+            _min_house_label_probability(),
+            discard_invalid_bytes,
+            discard_clip_non_property,
+            discard_clip_weak_house,
+            download_failures,
+        )
+
+    if urls_to_process and not selected:
+        logger.warning(
+            "condition-score filter dropped all %s images (invalid_bytes=%s clip_non_property=%s "
+            "clip_weak_house=%s download_failures=%s). Check Cotality bytes vs HTML cache.",
+            len(urls_to_process),
+            discard_invalid_bytes,
+            discard_clip_non_property,
+            discard_clip_weak_house,
+            download_failures,
+        )
 
     return {
         "selected": selected,
         "discarded_count": discarded_count,
+        "clip_strict_count": len(strict),
+        "clip_fallback_count": fallback_added,
         "total_input": len(urls_to_process),
         "urls_received": urls_received,
         "urls_processed": len(urls_to_process),
@@ -416,5 +537,8 @@ def classify_and_filter_urls(
         "download_failures": download_failures,
         "waf_blocked": waf_blocked,
         "clip_available": clip_available(),
+        "discard_invalid_bytes": discard_invalid_bytes,
+        "discard_clip_non_property": discard_clip_non_property,
+        "discard_clip_weak_house": discard_clip_weak_house,
     }
 

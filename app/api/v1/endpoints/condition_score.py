@@ -107,6 +107,9 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                     "images_after_dedupe": images_after_dedupe,
                     "images_deduplicated": images_deduplicated,
                     "clip_available": clip_loaded,
+                    "discard_invalid_bytes": int(filter_result.get("discard_invalid_bytes", 0)),
+                    "discard_clip_non_property": int(filter_result.get("discard_clip_non_property", 0)),
+                    "discard_clip_weak_house": int(filter_result.get("discard_clip_weak_house", 0)),
                 },
             },
         )

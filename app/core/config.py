@@ -84,12 +84,12 @@ class Settings(BaseSettings):
         description="Max images per OpenAI vision request in condition-score (lower = faster, more reliable).",
     )
     CONDITION_SCORE_MAX_INPUT_URLS: int = Field(
-        default=100,
+        default=150,
         ge=6,
         le=200,
         description=(
             "Max listing URLs to download/CLIP per request. Larger feeds are evenly sampled "
-            "(e.g. 30+ or 100 photos). Vision still uses at most one photo per room (~6)."
+            "(e.g. 30+ or 150 photos). Vision still uses at most one photo per room (~6)."
         ),
     )
     CONDITION_SCORE_DOWNLOAD_CONCURRENCY: int = Field(
@@ -97,6 +97,24 @@ class Settings(BaseSettings):
         ge=1,
         le=32,
         description="Parallel workers when resolving many condition-score image URLs.",
+    )
+    CONDITION_SCORE_CLIP_MIN_HOUSE_PROB: float = Field(
+        default=0.04,
+        ge=0.01,
+        le=0.25,
+        description=(
+            "CLIP softmax threshold for a house room label. MLS interiors often score 0.04–0.06 "
+            "across 16 labels; lower values keep more real listing photos."
+        ),
+    )
+    CONDITION_SCORE_CLIP_MIN_PHOTOS: int = Field(
+        default=6,
+        ge=1,
+        le=20,
+        description=(
+            "Target photos to keep after CLIP when the listing has enough URLs. Below-threshold "
+            "house photos are added by best house score until this count (then dedupe picks rooms)."
+        ),
     )
     OPENAI_CONDITION_SCORE_VISION_MAX_RETRIES: int = Field(
         default=1,
