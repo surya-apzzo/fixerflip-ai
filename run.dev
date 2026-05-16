@@ -11,7 +11,7 @@ fi
 
 if [ ! -x ".venv/bin/uvicorn" ]; then
   echo "Installing dependencies..."
-  .venv/bin/pip install -r requirements.txt
+  .venv/bin/pip install -r requirements-dev.txt
 fi
 
 if [ ! -f ".env" ]; then

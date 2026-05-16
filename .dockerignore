@@ -1,0 +1,17 @@
+.venv
+venv
+__pycache__
+*.pyc
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.git
+.github
+.cache
+*.md
+.env
+.env.*
+!.env.example
+tests
+assets
+terminals
