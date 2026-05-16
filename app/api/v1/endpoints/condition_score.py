@@ -8,6 +8,7 @@ from app.core.image_download import image_download_config_summary
 from app.engine.image_condition.services.aggregator import aggregate
 from app.engine.image_condition.services.image_filter import (
     classify_and_filter_urls,
+    clip_available,
     deduplicate_filtered_by_room_type,
 )
 from app.engine.image_condition.services.vision_scorer import ImageDownloadError, score_from_images
@@ -26,9 +27,11 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
     discarded_count = int(filter_result.get("discarded_count", 0))
     download_failures = int(filter_result.get("download_failures", 0))
     waf_blocked = bool(filter_result.get("waf_blocked", False))
+    clip_loaded = bool(filter_result.get("clip_available", clip_available()))
 
     images_after_filter = len(selected)
     selected, images_deduplicated = deduplicate_filtered_by_room_type(selected)
+    images_after_dedupe = len(selected)
 
     if total_input > 0 and not selected:
         if waf_blocked and download_failures >= total_input:
@@ -70,24 +73,37 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                     },
                 },
             )
+        if images_after_filter > 0 and images_after_dedupe == 0:
+            message = (
+                "Photos passed download/filter but none were kept for vision. "
+                "Redeploy the latest API build (dedupe fallback when CLIP is missing). "
+                "Ensure S3 cache objects are real JPEGs, not HTML error pages."
+            )
+        elif not clip_loaded and images_after_filter == 0:
+            message = (
+                "No listing photos could be classified. CLIP is not installed on this server and "
+                "cached/downloaded bytes may be invalid. Rebuild Docker with torch+CLIP, or warm S3 "
+                "cache from local using the same STORAGE_* and property_id."
+            )
+        else:
+            message = (
+                "No usable house/property photos found after filtering. "
+                "Floor plans, aerials, pools, and street views are excluded, or photos could not "
+                "be downloaded/decoded."
+            )
         raise HTTPException(
             status_code=422,
             detail={
                 "code": "VALIDATION_ERROR",
-                "errors": [
-                    {
-                        "field": "image_urls",
-                        "message": (
-                            "No usable house/property photos found after filtering. "
-                            "Floor plans, aerials, pools, and street views are excluded, or CLIP could not "
-                            "classify the photos as interior/exterior house shots."
-                        ),
-                    }
-                ],
+                "errors": [{"field": "image_urls", "message": message}],
                 "meta": {
                     "total_input": total_input,
                     "images_discarded": discarded_count,
                     "download_failures": download_failures,
+                    "images_after_filter": images_after_filter,
+                    "images_after_dedupe": images_after_dedupe,
+                    "images_deduplicated": images_deduplicated,
+                    "clip_available": clip_loaded,
                 },
             },
         )

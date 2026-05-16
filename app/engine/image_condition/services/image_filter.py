@@ -7,6 +7,7 @@ from dataclasses import dataclass
 
 from PIL import Image
 
+from app.core.image_bytes import is_valid_image_bytes
 from app.services.listing_image_storage import resolve_listing_image_bytes
 
 logger = logging.getLogger(__name__)
@@ -185,6 +186,9 @@ def _is_non_property_image(probs) -> bool:
 
 
 def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | None:
+    if not is_valid_image_bytes(image_bytes):
+        logger.warning("Bytes are not a valid image (HTML/WAF page?) for %s", source[:100])
+        return None
     try:
         image = Image.open(io.BytesIO(image_bytes)).convert("RGB")
     except Exception as exc:
@@ -307,6 +311,7 @@ def classify_and_filter_urls(
             "total_input": 0,
             "download_failures": 0,
             "waf_blocked": False,
+            "clip_available": clip_available(),
         }
 
     selected: list[FilteredImage] = []
@@ -344,5 +349,6 @@ def classify_and_filter_urls(
         "total_input": len(image_urls),
         "download_failures": download_failures,
         "waf_blocked": waf_blocked,
+        "clip_available": clip_available(),
     }
 

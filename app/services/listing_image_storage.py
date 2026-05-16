@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from urllib.parse import urlparse
 
 from app.core.config import settings
+from app.core.image_bytes import is_valid_image_bytes
 from app.core.image_download import ImageDownloadFlow, download_listing_image_with_meta
 from app.services.storage_service import _make_s3_client, _require_storage_config, _upload_bytes_to_bucket
 
@@ -73,7 +74,10 @@ def _get_bytes_by_key(key: str) -> bytes | None:
         if body is None:
             return None
         data = body.read()
-        return data if data and len(data) > 256 else None
+        if not is_valid_image_bytes(data):
+            logger.warning("S3 object is not a valid image (key=%s, bytes=%s)", key, len(data or b""))
+            return None
+        return data
     except Exception as exc:
         logger.debug("S3 get_object failed for key=%s: %s", key, exc)
         return None
@@ -127,9 +131,14 @@ def resolve_listing_image_bytes(
                 cleaned[:120],
             )
             return ListingImageResolveResult(content=cached, source="s3_cache")
+        logger.warning(
+            "condition-score S3 cache miss or invalid image bytes property_id=%s url=%s",
+            property_id,
+            cleaned[:120],
+        )
 
     outcome = download_listing_image_with_meta(cleaned, flow=flow)
-    if outcome.content is not None:
+    if outcome.content is not None and is_valid_image_bytes(outcome.content):
         cached_url = None
         if listing_image_storage_configured() and property_id:
             cached_url = put_listing_image_cache(property_id, cleaned, outcome.content)

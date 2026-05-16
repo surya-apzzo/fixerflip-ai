@@ -19,12 +19,30 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    import asyncio
+
     logger.info("Starting %s (env=%s)", settings.PROJECT_NAME, settings.ENVIRONMENT)
     logger.info(
         "Image download config: renovation=%s condition_score=%s",
         image_download_config_summary("renovation"),
         image_download_config_summary("condition_score"),
     )
+
+    def _warm_condition_score_clip() -> None:
+        from app.engine.image_condition.services.image_filter import clip_available
+
+        if clip_available():
+            logger.info("Condition-score CLIP ready.")
+        else:
+            logger.warning(
+                "Condition-score CLIP not loaded; dedupe will keep up to 6 photos for OpenAI labeling."
+            )
+
+    try:
+        await asyncio.to_thread(_warm_condition_score_clip)
+    except Exception as exc:
+        logger.warning("Condition-score CLIP warm-up failed: %s", exc)
+
     try:
         yield
     finally:
