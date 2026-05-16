@@ -198,7 +198,10 @@ def download_listing_image_bytes(
 
     headers = build_image_download_headers(cleaned, flow=flow)
     try:
-        response = httpx.get(cleaned, timeout=timeout, follow_redirects=True, headers=headers)
+        response = httpx.get(cleaned, 
+                             timeout=timeout, 
+                             follow_redirects=True, 
+                             headers=headers)
         response.raise_for_status()
         return response.content
     except httpx.HTTPStatusError as exc:

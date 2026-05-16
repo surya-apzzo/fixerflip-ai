@@ -228,27 +228,16 @@ def deduplicate_filtered_by_room_type(
     return unique, skipped
 
 
-def classify_and_filter_inputs(
-    items: list[tuple[str | None, bytes | None]],
-) -> dict[str, object]:
-    """Filter listing photos. Each item is (optional_url, optional_bytes). Skips download when bytes are set."""
-    if not items:
+def classify_and_filter_urls(image_urls: list[str]) -> dict[str, object]:
+    """Download each URL, run CLIP, and keep house/property photos only."""
+    if not image_urls:
         return {"selected": [], "discarded_count": 0, "total_input": 0, "download_failures": 0}
 
     selected: list[FilteredImage] = []
     discarded_count = 0
     download_failures = 0
 
-    for url, image_bytes in items:
-        source = (url or "").strip() or "embedded-image"
-        if image_bytes is not None:
-            row = _clip_classify_bytes(image_bytes, source=source)
-            if row is None:
-                discarded_count += 1
-            else:
-                selected.append(row)
-            continue
-
+    for url in image_urls:
         cleaned = (url or "").strip()
         if not cleaned:
             discarded_count += 1
@@ -268,13 +257,7 @@ def classify_and_filter_inputs(
     return {
         "selected": selected,
         "discarded_count": discarded_count,
-        "total_input": len(items),
+        "total_input": len(image_urls),
         "download_failures": download_failures,
     }
-
-
-def classify_and_filter_urls(image_urls: list[str]) -> dict[str, object]:
-    """Download each URL, run CLIP, and keep house/property photos only."""
-    items = [(url.strip(), None) for url in image_urls if url and url.strip()]
-    return classify_and_filter_inputs(items)
 

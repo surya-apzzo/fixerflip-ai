@@ -7,10 +7,9 @@ from app.core.config import settings
 from app.core.image_download import image_download_config_summary
 from app.engine.image_condition.services.aggregator import aggregate
 from app.engine.image_condition.services.image_filter import (
-    classify_and_filter_inputs,
+    classify_and_filter_urls,
     deduplicate_filtered_by_room_type,
 )
-from app.engine.image_condition.services.vision_image_payload import decode_image_base64_field
 from app.engine.image_condition.services.vision_scorer import ImageDownloadError, score_from_images
 from app.schemas.requests.property_condition import ConditionScoreRequest
 from app.schemas.responses.property_condition import ConditionScoreResponse
@@ -18,43 +17,29 @@ from app.schemas.responses.property_condition import ConditionScoreResponse
 router = APIRouter()
 
 
-def _build_filter_inputs(payload: ConditionScoreRequest) -> list[tuple[str | None, bytes | None]]:
-    if payload.images:
-        items: list[tuple[str | None, bytes | None]] = []
-        for img in payload.images:
-            url = (img.url or "").strip() or None
-            b64 = (img.base64 or "").strip()
-            image_bytes = decode_image_base64_field(b64) if b64 else None
-            items.append((url, image_bytes))
-        return items
-
-    return [(url.strip(), None) for url in payload.image_urls if url and url.strip()]
-
-
 @router.post("/condition-score", response_model=ConditionScoreResponse)
 async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreResponse:
-    filter_items = _build_filter_inputs(payload)
-    filter_result = classify_and_filter_inputs(filter_items)
+    image_urls = [u.strip() for u in payload.image_urls if u and u.strip()]
+    filter_result = classify_and_filter_urls(image_urls)
     selected = filter_result["selected"]
-    total_input = int(filter_result.get("total_input", len(filter_items)))
+    total_input = int(filter_result.get("total_input", len(image_urls)))
     discarded_count = int(filter_result.get("discarded_count", 0))
     download_failures = int(filter_result.get("download_failures", 0))
-    uses_embedded_bytes = any(b is not None for _u, b in filter_items)
 
     images_after_filter = len(selected)
     selected, images_deduplicated = deduplicate_filtered_by_room_type(selected)
 
     if total_input > 0 and not selected:
-        if not uses_embedded_bytes and download_failures >= total_input:
+        if download_failures >= total_input:
             raise HTTPException(
                 status_code=422,
                 detail={
                     "code": "IMAGE_DOWNLOAD_FAILED",
                     "message": (
                         "Could not download listing photo URLs (HTTP 403). Cotality/Trestle "
-                        "(api.cotality.com) blocks cloud servers and image proxies. Send images[] "
-                        "with base64 from your frontend (browser can load the photos), or re-host "
-                        "on your S3/CDN and pass those URLs in image_urls."
+                        "(api.cotality.com) blocks cloud servers and image proxies. Re-host photos "
+                        "on your S3/CDN and pass those URLs in image_urls, or ensure URLs are "
+                        "publicly reachable from this server."
                     ),
                     "meta": {
                         "total_input": total_input,
@@ -70,7 +55,7 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
                 "code": "VALIDATION_ERROR",
                 "errors": [
                     {
-                        "field": "images" if uses_embedded_bytes else "image_urls",
+                        "field": "image_urls",
                         "message": (
                             "No usable house/property photos found after filtering. "
                             "Floor plans, aerials, pools, and street views are excluded, or CLIP could not "
@@ -94,8 +79,8 @@ async def condition_score(payload: ConditionScoreRequest) -> ConditionScoreRespo
             detail={
                 "code": "IMAGE_DOWNLOAD_FAILED",
                 "message": (
-                    "Listing photo bytes could not be prepared for vision. "
-                    "Prefer images[].base64 for Cotality feeds."
+                    "Listing photo bytes could not be prepared for vision after download. "
+                    "Check that image_urls return valid image content from this server."
                 ),
                 "meta": {
                     "images_selected": exc.selected,
