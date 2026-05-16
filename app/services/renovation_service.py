@@ -309,8 +309,8 @@ async def _generate_renovated_image_url(
         logger.warning("Renovation image edit failed: %s", edit_exc)
         error_message = str(edit_exc) if isinstance(edit_exc, ValueError) else _PUBLIC_IMAGE_EDIT_ERROR
         pipeline_warnings.append(error_message)
-        # Return source image URL when edit fails so clients always receive a usable image link.
-        return payload.image_url
+        # No renovated preview — use staged_source_image_url for the original listing photo.
+        return None
 
     uploaded_url = await _upload_renovated_image(
         image_base64=edit_result.image_base64,
@@ -493,6 +493,7 @@ async def build_renovation_estimate(payload: RenovationEstimateRequest) -> Renov
         condition_score=int(image_condition.condition_score),
         renovated_image_url=renovated_image_url,
         staged_source_image_url=staged_source_image_url,
+        warnings=pipeline_warnings,
     )
     logger.info(
         "Renovation estimate request end class=%s range=%s warnings=%s duration_ms=%.1f",

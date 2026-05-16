@@ -86,6 +86,39 @@ def _is_retryable_openai_exception(exc: Exception) -> bool:
     return exc.__class__.__name__ in retryable_names
 
 
+def _is_openai_moderation_blocked(exc: Exception) -> bool:
+    body = getattr(exc, "body", None)
+    if isinstance(body, dict):
+        err = body.get("error") or {}
+        if err.get("code") == "moderation_blocked":
+            return True
+    text = str(exc).lower()
+    return "moderation_blocked" in text or "rejected by the safety system" in text
+
+
+def _moderation_safe_edit_prompt(base_prompt: str) -> str:
+    """Shorter, conservative prompt for a single retry after moderation_blocked."""
+    return (
+        f"{base_prompt}\n\n"
+        "Additional safety constraints: PG-rated residential real-estate marketing photo only. "
+        "No people, faces, or bodies. Cosmetic property finish update only (paint/flooring/materials). "
+        "Keep the same room, camera angle, and layout."
+    )
+
+
+def _image_edit_failure_message(exc: Exception) -> str:
+    if _is_openai_moderation_blocked(exc):
+        return (
+            "OpenAI declined to generate a renovation preview (content safety filter). "
+            "The cost estimate is still valid. Use staged_source_image_url for the original photo, "
+            "or retry with simpler scope (e.g. paint only) or a different listing photo."
+        )
+    return (
+        "Image edit request failed. Retry later. "
+        "If this repeats, inspect server logs for the upstream OpenAI error."
+    )
+
+
 async def _wait_for_retry_backoff(attempt: int) -> None:
     await asyncio.sleep(_OPENAI_IMAGE_EDIT_RETRY_BACKOFF_SECONDS * (2**attempt))
 
@@ -618,7 +651,10 @@ async def edit_property_image_from_url(
     )
 
     last_exc: Exception | None = None
-    for attempt in range(max_retries + 1):
+    moderation_retry_used = False
+    active_prompt = prompt
+    attempt = 0
+    while True:
         try:
             model = settings.default_openai_image_edit_model
             edit_image: tuple[str, bytes, str] | list[tuple[str, bytes, str]] = (
@@ -627,7 +663,7 @@ async def edit_property_image_from_url(
             edit_kwargs: dict = {
                 "model": model,
                 "image": edit_image,
-                "prompt": prompt,
+                "prompt": active_prompt,
                 "size": _select_gpt_image_edit_size(image_bytes),
                 "quality": "high",
             }
@@ -640,7 +676,9 @@ async def edit_property_image_from_url(
             if not data or not getattr(data[0], "b64_json", None):
                 raise ValueError("Image edit failed: no image returned.")
             first = data[0]
-            revised_prompt = getattr(first, "revised_prompt", "") or prompt
+            revised_prompt = getattr(first, "revised_prompt", "") or active_prompt
+            if moderation_retry_used:
+                logger.info("OpenAI images.edit succeeded after moderation-safe prompt retry")
             return ImageEditResult(
                 revised_prompt=revised_prompt,
                 image_base64=first.b64_json,
@@ -648,9 +686,16 @@ async def edit_property_image_from_url(
             )
         except Exception as exc:
             last_exc = exc
-            is_retryable = _is_retryable_openai_exception(exc)
-            if attempt < max_retries and is_retryable:
+            if _is_openai_moderation_blocked(exc) and not moderation_retry_used:
+                moderation_retry_used = True
+                active_prompt = _moderation_safe_edit_prompt(prompt)
+                logger.warning(
+                    "OpenAI images.edit moderation_blocked; retrying once with conservative prompt"
+                )
+                continue
+            if attempt < max_retries and _is_retryable_openai_exception(exc):
                 await _wait_for_retry_backoff(attempt)
+                attempt += 1
                 continue
             logger.warning(
                 "OpenAI images.edit failed after %s attempt(s) (timeout=%ss, model=%s): %s: %s",
@@ -661,12 +706,7 @@ async def edit_property_image_from_url(
                 exc,
                 exc_info=True,
             )
-            raise ValueError(
-                "Image edit request failed. Retry later. "
-                "If this repeats, inspect server logs for the upstream OpenAI error."
-            ) from exc
-
-    raise ValueError("Image edit request failed.") from last_exc
+            raise ValueError(_image_edit_failure_message(exc)) from exc
 
 
 async def _download_source_image(image_url: str, *, property_id: str = "") -> tuple[bytes, str]:

@@ -21,3 +21,11 @@ class RenovationEstimateResponse(BaseModel):
         default=None,
         description="Listing photo URL on your bucket used for vision/edit (after S3 staging).",
     )
+    renovation_preview_available: bool = Field(
+        default=False,
+        description="True when renovated_image_url is an AI-generated preview (not the original staged photo).",
+    )
+    warnings: List[str] = Field(
+        default_factory=list,
+        description="Non-fatal pipeline notes (e.g. image edit skipped or moderation blocked).",
+    )
