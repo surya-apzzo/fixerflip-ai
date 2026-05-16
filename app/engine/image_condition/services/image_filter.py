@@ -23,6 +23,16 @@ HOUSE_ROOM_LABELS: tuple[str, ...] = (
 
 _HOUSE_ROOM_TYPES = frozenset(HOUSE_ROOM_LABELS)
 
+# One vision photo per room when the listing has them (dedupe uses ranked CLIP labels).
+CONDITION_SCORE_ROOM_PRIORITY: tuple[str, ...] = (
+    "kitchen interior",
+    "bathroom interior",
+    "living room interior",
+    "bedroom interior",
+    "exterior front of house",
+    "basement interior",
+)
+
 # Non-property / non-house images — never used for condition score.
 NON_PROPERTY_LABELS: frozenset[str] = frozenset(
     {
@@ -89,6 +99,8 @@ class FilteredImage:
     room_type: str
     confidence: float
     image_bytes: bytes | None = None
+    # Other house labels for this photo (2nd/3rd best) so duplicates can fill different rooms.
+    room_rankings: tuple[tuple[str, float], ...] = ()
 
 
 def _load_clip() -> bool:
@@ -137,13 +149,19 @@ def _heuristic_home_image(url: str) -> bool:
     return not any(term in lowered for term in discard_terms)
 
 
+def _ranked_house_labels(probs) -> list[tuple[str, float]]:
+    """House labels for one photo, highest softmax probability first."""
+    pairs = [(ALL_LABELS[i], float(probs[i].item())) for i in HOUSE_LABEL_INDICES]
+    pairs.sort(key=lambda row: -row[1])
+    return [(label, conf) for label, conf in pairs if conf >= _MIN_HOUSE_LABEL_PROBABILITY]
+
+
 def _best_house_label(probs) -> tuple[str, float] | None:
     """Best-scoring house label, or None if nothing crosses the keep threshold."""
-    best_idx = max(HOUSE_LABEL_INDICES, key=lambda i: float(probs[i].item()))
-    confidence = float(probs[best_idx].item())
-    if confidence < _MIN_HOUSE_LABEL_PROBABILITY:
+    ranked = _ranked_house_labels(probs)
+    if not ranked:
         return None
-    return ALL_LABELS[best_idx], confidence
+    return ranked[0]
 
 
 def _is_non_property_image(probs) -> bool:
@@ -178,16 +196,17 @@ def _clip_classify_bytes(image_bytes: bytes, *, source: str) -> FilteredImage | 
         if _is_non_property_image(probs):
             logger.debug("Discarded non-property image (CLIP): %s", source[:100])
             return None
-        house_match = _best_house_label(probs)
-        if house_match is None:
+        rankings = _ranked_house_labels(probs)
+        if not rankings:
             logger.debug("Discarded image with no confident house label: %s", source[:100])
             return None
-        room_type, confidence = house_match
+        room_type, confidence = rankings[0]
         return FilteredImage(
             image_url=source,
             room_type=room_type,
             confidence=confidence,
             image_bytes=image_bytes,
+            room_rankings=tuple(rankings),
         )
     except Exception as exc:
         logger.warning("CLIP classification skipped for %s: %s", source[:100], exc)
@@ -198,31 +217,42 @@ def deduplicate_filtered_by_room_type(
     images: list[FilteredImage],
 ) -> tuple[list[FilteredImage], int]:
     """
-    Keep one photo per ``room_type`` (highest CLIP confidence) before vision scoring.
+    Keep one photo per room (kitchen, bath, living, bedroom, exterior, basement).
 
-    Example: three ``bedroom interior`` URLs after filter → one bedroom is sent to OpenAI.
+    Uses each photo's ranked CLIP house labels so duplicate "best" labels (e.g. many
+    exteriors) can still fill other rooms via 2nd/3rd choice labels.
     """
     if not images:
         return [], 0
 
-    best_by_room: dict[str, FilteredImage] = {}
-    for img in images:
-        room = (img.room_type or "unknown").strip() or "unknown"
-        prev = best_by_room.get(room)
-        if prev is None or float(img.confidence) > float(prev.confidence):
-            best_by_room[room] = img
+    room_slots: dict[str, FilteredImage] = {}
+    used_urls: set[str] = set()
 
-    label_order = {label: index for index, label in enumerate(HOUSE_ROOM_LABELS)}
+    for img in sorted(images, key=lambda row: -float(row.confidence)):
+        rankings = img.room_rankings or ((img.room_type, img.confidence),)
+        assigned_room: str | None = None
+        for room, _conf in rankings:
+            if room not in _HOUSE_ROOM_TYPES or room in room_slots:
+                continue
+            room_slots[room] = img
+            used_urls.add(img.image_url)
+            assigned_room = room
+            break
+        if assigned_room:
+            img.room_type = assigned_room
+
+    priority = {label: index for index, label in enumerate(CONDITION_SCORE_ROOM_PRIORITY)}
     unique = sorted(
-        best_by_room.values(),
-        key=lambda row: (label_order.get(row.room_type, 999), -float(row.confidence)),
+        room_slots.values(),
+        key=lambda row: (priority.get(row.room_type, 999), -float(row.confidence)),
     )
-    skipped = len(images) - len(unique)
-    if skipped:
+    skipped = len(images) - len(used_urls)
+    if skipped or len(unique) > 1:
         logger.info(
-            "condition-score dedupe: %s filtered image(s) -> %s unique room type(s) (%s duplicate room photos skipped)",
+            "condition-score dedupe: %s filtered -> %s room(s) [%s] (%s duplicate photos skipped)",
             len(images),
             len(unique),
+            ", ".join(row.room_type for row in unique),
             skipped,
         )
     return unique, skipped
