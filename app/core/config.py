@@ -84,7 +84,7 @@ class Settings(BaseSettings):
         description="Max images per OpenAI vision request in condition-score (lower = faster, more reliable).",
     )
     CONDITION_SCORE_MAX_INPUT_URLS: int = Field(
-        default=60,
+        default=100,
         ge=6,
         le=200,
         description=(
