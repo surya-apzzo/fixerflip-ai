@@ -18,9 +18,11 @@ black>=24.1.0
 # Optional dependencies for AWS S3 support
 boto3==1.42.93
 
-# Optional: OpenAI CLIP for /condition-score room filtering (see app/engine/image_condition/services/image_filter.py).
-# Install in order (CPU wheels; use CUDA index URL if you need GPU):
-#   pip install torch torchvision --index-url https://download.pytorch.org/whl/cpu
-#   pip install ftfy regex tqdm
-#   pip install git+https://github.com/openai/CLIP.git
-# First run downloads ViT-B/32 weights (~350MB) into the PyTorch cache.
+# CLIP for /condition-score room filtering (CPU wheels; first run downloads ViT-B/32 ~350MB).
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch>=2.2.0
+torchvision>=0.17.0
+ftfy>=6.1.0
+regex>=2023.0.0
+tqdm>=4.66.0
+clip @ git+https://github.com/openai/CLIP.git

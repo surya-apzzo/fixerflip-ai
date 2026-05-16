@@ -7,6 +7,10 @@ WORKDIR /app
 
 EXPOSE 8080
 
+# git: install OpenAI CLIP from GitHub; libgomp: PyTorch CPU runtime
+RUN apt-get update && apt-get install -y --no-install-recommends git libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /app/
 
 RUN python -m venv /opt/venv

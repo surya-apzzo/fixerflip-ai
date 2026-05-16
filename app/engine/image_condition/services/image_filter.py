@@ -91,6 +91,7 @@ _clip_model = None
 _clip_preproc = None
 _clip_tokenize = None
 _clip_torch = None
+_clip_load_attempted = False
 
 
 @dataclass(slots=True)
@@ -103,20 +104,33 @@ class FilteredImage:
     room_rankings: tuple[tuple[str, float], ...] = ()
 
 
+def clip_available() -> bool:
+    return _load_clip()
+
+
 def _load_clip() -> bool:
-    global _clip_model, _clip_preproc, _clip_tokenize, _clip_torch
+    global _clip_model, _clip_preproc, _clip_tokenize, _clip_torch, _clip_load_attempted
     if _clip_model is not None:
         return True
+    if _clip_load_attempted:
+        return False
+    _clip_load_attempted = True
     try:
         import clip  # type: ignore
         import torch  # type: ignore
-    except Exception:
-        logger.warning("CLIP dependencies unavailable; using URL heuristic home-image filter.")
+    except Exception as exc:
+        logger.warning(
+            "CLIP dependencies unavailable (%s). Dedupe will keep up to %s photos for "
+            "OpenAI vision room labeling; install torch+CLIP in the deploy image for best results.",
+            exc,
+            len(CONDITION_SCORE_ROOM_PRIORITY),
+        )
         return False
 
     _clip_model, _clip_preproc = clip.load("ViT-B/32", device="cpu")
     _clip_tokenize = clip.tokenize
     _clip_torch = torch
+    logger.info("CLIP ViT-B/32 loaded for condition-score room filtering.")
     return True
 
 
@@ -246,8 +260,30 @@ def deduplicate_filtered_by_room_type(
         room_slots.values(),
         key=lambda row: (priority.get(row.room_type, 999), -float(row.confidence)),
     )
+
+    # CLIP missing on server: photos stay room_type=unknown → assign no slots above.
+    # Keep best N unique photos; OpenAI vision prompt assigns kitchen/bath/etc.
+    if not unique and images:
+        cap = len(CONDITION_SCORE_ROOM_PRIORITY)
+        seen_urls: set[str] = set()
+        fallback: list[FilteredImage] = []
+        for img in sorted(images, key=lambda row: -float(row.confidence)):
+            if img.image_url in seen_urls:
+                continue
+            seen_urls.add(img.image_url)
+            fallback.append(img)
+            if len(fallback) >= cap:
+                break
+        unique = fallback
+        used_urls = seen_urls
+        logger.info(
+            "condition-score dedupe (no CLIP): %s filtered -> %s photo(s) for vision labeling",
+            len(images),
+            len(unique),
+        )
+
     skipped = len(images) - len(used_urls)
-    if skipped or len(unique) > 1:
+    if unique and (skipped or len(unique) > 1):
         logger.info(
             "condition-score dedupe: %s filtered -> %s room(s) [%s] (%s duplicate photos skipped)",
             len(images),

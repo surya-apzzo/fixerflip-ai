@@ -61,6 +61,16 @@ def test_dedupe_fills_distinct_rooms_from_ranked_labels() -> None:
     assert skipped == 0
 
 
+def test_dedupe_fallback_when_clip_unknown_room_types() -> None:
+    images = [
+        _img(f"https://cdn/{i}.jpg", "unknown", 0.5, ())
+        for i in range(10)
+    ]
+    unique, skipped = deduplicate_filtered_by_room_type(images)
+    assert len(unique) == 6
+    assert skipped == 4
+
+
 def test_dedupe_keeps_one_per_duplicate_room_when_no_alternate_labels() -> None:
     images = [
         _img("https://cdn/1.jpg", "bedroom interior", 0.5, (("bedroom interior", 0.5),)),
