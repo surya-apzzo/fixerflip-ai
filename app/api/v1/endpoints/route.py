@@ -4,7 +4,7 @@ import base64
 import json
 import logging
 
-from fastapi import APIRouter, Body, File, Form, HTTPException, Query, UploadFile
+from fastapi import APIRouter, Body, File, Form, HTTPException, Query, Request, UploadFile
 
 from app.core.image_bytes import is_valid_image_bytes
 from app.engine.renovation_engine.vision_analysis import analyze_renovation_image_url
@@ -15,6 +15,9 @@ from app.schemas.responses.renovation import RenovationEstimateResponse
 from app.schemas.responses.stage_image import StageListingImageResponse
 from app.services.listing_image_storage import (
     extract_property_id_from_listing_url,
+    get_cached_listing_bytes_any_flow,
+    is_own_storage_url,
+    listing_image_storage_configured,
     resolve_effective_property_id,
     stage_listing_image_for_renovation_async,
     stage_listing_image_from_bytes,
@@ -37,25 +40,15 @@ def _staging_http_exception(exc: ValueError, *, image_url: str, property_id: str
             "message": str(exc),
             "effective_property_id": effective_pid or None,
             "hint": (
-                "Upload the photo with POST /renovation/stage-image (multipart) or "
-                "POST /renovation/estimate-with-image, then use staged_source_image_url. "
-                "Railway cannot download Cotality URLs when Incapsula blocks the server."
+                "Attach the listing photo: POST /renovation/estimate as multipart with fields "
+                "'payload' (JSON) + 'source_image' (file). Railway cannot download Cotality or "
+                "Cloudflare-protected CDN URLs without an uploaded file."
             ),
         },
     )
 
 
-@router.post("/stage-image", response_model=StageListingImageResponse)
-async def stage_listing_image(
-    image_url: str = Form(..., description="Original listing URL (cache key; e.g. Cotality Trestle URL)."),
-    property_id: str = Form(default="", description="Listing id (optional; parsed from Cotality URL if empty)."),
-    source_image: UploadFile = File(..., description="JPEG/PNG/WebP file from browser or app."),
-) -> StageListingImageResponse:
-    """
-    Demo-friendly: upload a photo file so Railway never calls Cotality.
-
-    Returns a bucket URL to pass as ``image_url`` on ``POST /renovation/estimate``.
-    """
+async def _read_uploaded_image(source_image: UploadFile) -> bytes:
     raw = await source_image.read()
     if len(raw) > _MAX_UPLOAD_BYTES:
         raise HTTPException(
@@ -65,6 +58,54 @@ async def stage_listing_image(
                 "message": f"Image too large (max {_MAX_UPLOAD_BYTES // (1024 * 1024)}MB).",
             },
         )
+    if not is_valid_image_bytes(raw):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VALIDATION_ERROR", "message": "Uploaded file is not a valid image."},
+        )
+    return raw
+
+
+async def _estimate_from_multipart(
+    *,
+    payload: str,
+    source_image: UploadFile,
+) -> RenovationEstimateResponse:
+    try:
+        request = RenovationEstimateRequest.model_validate(json.loads(payload))
+    except json.JSONDecodeError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VALIDATION_ERROR", "message": f"Invalid payload JSON: {exc}"},
+        ) from exc
+    except Exception as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "VALIDATION_ERROR", "message": str(exc)},
+        ) from exc
+
+    raw = await _read_uploaded_image(source_image)
+    request = request.model_copy(
+        update={"source_image_base64": base64.b64encode(raw).decode("ascii")}
+    )
+    try:
+        return await build_renovation_estimate(request)
+    except ValueError as exc:
+        raise _staging_http_exception(
+            exc,
+            image_url=request.image_url,
+            property_id=request.property_id,
+        ) from exc
+
+
+@router.post("/stage-image", response_model=StageListingImageResponse)
+async def stage_listing_image(
+    image_url: str = Form(..., description="Original listing URL (cache key; e.g. Cotality Trestle URL)."),
+    property_id: str = Form(default="", description="Listing id (optional; parsed from Cotality URL if empty)."),
+    source_image: UploadFile = File(..., description="JPEG/PNG/WebP file from browser or app."),
+) -> StageListingImageResponse:
+    """Upload a photo to S3 so Railway never calls Cotality/CDN directly."""
+    raw = await _read_uploaded_image(source_image)
     try:
         staged = stage_listing_image_from_bytes(
             image_url.strip(),
@@ -89,7 +130,7 @@ async def stage_listing_image_json(
     property_id: str = Body(default=""),
     source_image_base64: str = Body(...),
 ) -> StageListingImageResponse:
-    """Stage via JSON base64 (same as estimate ``source_image_base64``)."""
+    """Stage via JSON base64."""
     try:
         staged = await stage_listing_image_for_renovation_async(
             image_url.strip(),
@@ -110,23 +151,56 @@ async def stage_listing_image_json(
 
 @router.post("/estimate-with-image", response_model=RenovationEstimateResponse)
 async def renovation_estimate_with_image(
-    payload: str = Form(
-        ...,
-        description="JSON string: RenovationEstimateRequest fields (omit source_image_base64).",
-    ),
-    source_image: UploadFile = File(..., description="Listing photo file (required on Railway + Cotality)."),
+    payload: str = Form(..., description="JSON RenovationEstimateRequest (omit source_image_base64)."),
+    source_image: UploadFile = File(..., description="Listing photo file."),
 ) -> RenovationEstimateResponse:
-    """
-    One-shot demo: upload photo + estimate JSON in one multipart request.
+    """Alias for multipart estimate (same as POST /estimate with multipart)."""
+    return await _estimate_from_multipart(payload=payload, source_image=source_image)
 
-    Use when Cotality blocks Railway and you have the image file locally or from the app.
+
+@router.post("/estimate", response_model=RenovationEstimateResponse)
+async def renovation_estimate(request: Request) -> RenovationEstimateResponse:
     """
+    Renovation estimate.
+
+    **JSON** (``Content-Type: application/json``): standard body; requires ``source_image_base64``
+    on Railway when ``image_url`` is Cotality/MLS CDN.
+
+    **Multipart** (``Content-Type: multipart/form-data``): fields ``payload`` (JSON string) +
+    ``source_image`` (file) — **use this for demos on Railway**.
+    """
+    content_type = (request.headers.get("content-type") or "").lower()
+
+    if "multipart/form-data" in content_type:
+        form = await request.form()
+        payload_field = form.get("payload")
+        source_field = form.get("source_image")
+        if payload_field is None or source_field is None:
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VALIDATION_ERROR",
+                    "message": "Multipart request requires form fields: payload (JSON), source_image (file).",
+                },
+            )
+        if not hasattr(source_field, "read"):
+            raise HTTPException(
+                status_code=422,
+                detail={
+                    "code": "VALIDATION_ERROR",
+                    "message": "source_image must be a file upload, not plain text.",
+                },
+            )
+        payload_str = payload_field if isinstance(payload_field, str) else str(payload_field)
+        return await _estimate_from_multipart(payload=payload_str, source_image=source_field)
+
     try:
-        request = RenovationEstimateRequest.model_validate(json.loads(payload))
+        body = await request.json()
+        payload = RenovationEstimateRequest.model_validate(body)
     except json.JSONDecodeError as exc:
         raise HTTPException(
             status_code=422,
-            detail={"code": "VALIDATION_ERROR", "message": f"Invalid payload JSON: {exc}"},
+            detail={"code": "VALIDATION_ERROR", "message": f"Invalid JSON body: {exc}"},
         ) from exc
     except Exception as exc:
         raise HTTPException(
@@ -134,51 +208,44 @@ async def renovation_estimate_with_image(
             detail={"code": "VALIDATION_ERROR", "message": str(exc)},
         ) from exc
 
-    raw = await source_image.read()
-    if len(raw) > _MAX_UPLOAD_BYTES:
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "VALIDATION_ERROR", "message": "Image too large (max 20MB)."},
-        )
-    if not is_valid_image_bytes(raw):
-        raise HTTPException(
-            status_code=422,
-            detail={"code": "VALIDATION_ERROR", "message": "Uploaded file is not a valid image."},
-        )
-
-    request = request.model_copy(
-        update={"source_image_base64": base64.b64encode(raw).decode("ascii")}
-    )
-    try:
-        return await build_renovation_estimate(request)
-    except ValueError as exc:
-        raise _staging_http_exception(
-            exc,
-            image_url=request.image_url,
-            property_id=request.property_id,
-        ) from exc
-
-
-@router.post("/estimate", response_model=RenovationEstimateResponse)
-async def renovation_estimate(payload: RenovationEstimateRequest) -> RenovationEstimateResponse:
-    try:
-        return await build_renovation_estimate(payload)
-    except ValueError as exc:
-        image_url = (payload.image_url or "").strip()
-        effective_pid = (payload.property_id or "").strip() or extract_property_id_from_listing_url(
-            image_url
-        )
+    image_url = (payload.image_url or "").strip()
+    needs_upload = bool(image_url) and not is_own_storage_url(image_url)
+    if (
+        needs_upload
+        and not (payload.source_image_base64 or "").strip()
+        and listing_image_storage_configured()
+    ):
+        pid = resolve_effective_property_id(payload.property_id, image_url, flow="renovation")
+        if get_cached_listing_bytes_any_flow(pid, image_url) is not None:
+            needs_upload = False
+    if needs_upload and not (payload.source_image_base64 or "").strip():
         raise HTTPException(
             status_code=422,
             detail={
-                "code": "LISTING_IMAGE_STAGING_FAILED",
-                "message": str(exc),
-                "effective_property_id": effective_pid or None,
+                "code": "LISTING_IMAGE_UPLOAD_REQUIRED",
+                "message": (
+                    "This image_url cannot be downloaded on the server (Cotality WAF / Cloudflare). "
+                    "Resend as multipart with source_image file, or include source_image_base64 in JSON."
+                ),
+                "effective_property_id": (
+                    (payload.property_id or "").strip()
+                    or extract_property_id_from_listing_url(image_url)
+                    or None
+                ),
                 "hint": (
-                    "Use POST /renovation/estimate-with-image (multipart file) or "
-                    "/renovation/stage-image, then pass staged_source_image_url as image_url."
+                    "Postman: Body → form-data → payload (text JSON) + source_image (file). "
+                    "Same URL: POST /api/v1/renovation/estimate"
                 ),
             },
+        )
+
+    try:
+        return await build_renovation_estimate(payload)
+    except ValueError as exc:
+        raise _staging_http_exception(
+            exc,
+            image_url=payload.image_url,
+            property_id=payload.property_id,
         ) from exc
 
 

@@ -76,14 +76,20 @@ def _referer_for_image_host(host: str) -> str | None:
 
 
 def _referer_for_image_url(image_url: str) -> str | None:
-    """CRMLS assets on third-party CDNs (e.g. imagecdn.realty.dev) need crmls.org Referer."""
+    """Pick MLS portal Referer from URL host/path (overrides generic env referer when they conflict)."""
     parsed = urlparse(image_url)
     host = (parsed.netloc or "").lower()
     path = (parsed.path or "").lower().replace("\\", "/")
-    if "crmls" in host or "/crmls/" in path or "mls_photos/crmls" in path:
-        return _MLS_HOST_REFERERS["crmls.org"]
     if "cotality.com" in host or "/trestle/" in path:
         return _MLS_HOST_REFERERS["cotality.com"]
+    if (
+        "realty.dev" in host
+        or "imagecdn" in host
+        or "/mls_photos/" in path
+    ):
+        return _MLS_HOST_REFERERS["realty.dev"]
+    if "crmls" in host or "/crmls/" in path or "mls_photos/crmls" in path:
+        return _MLS_HOST_REFERERS["crmls.org"]
     return _referer_for_image_host(parsed.netloc)
 
 
@@ -255,6 +261,10 @@ def _log_image_download_http_failure(
 
 
 def build_proxy_image_urls(image_url: str, *, flow: ImageDownloadFlow) -> list[str]:
+    # Trestle media requires OAuth Bearer; public image proxies cannot authenticate.
+    if is_trestle_media_url(image_url):
+        return []
+
     templates: list[str] = []
     configured = image_download_proxy_template(flow)
     if configured:
@@ -450,13 +460,12 @@ def download_listing_image_with_meta(
             waf_blocked=waf_blocked,
             bearer_sent=bearer_sent,
         )
-    if trestle_url and waf_blocked and not bearer_sent:
+    proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
+    if trestle_url and waf_blocked and not bearer_sent and proxy_urls:
         logger.info(
             "Trestle token/WAF blocked; trying public image proxies for %s",
             cleaned[:120],
         )
-
-    proxy_urls = build_proxy_image_urls(cleaned, flow=flow)
     headers = build_image_download_headers(cleaned, flow=flow)
     content = _try_proxy_download(
         image_url=cleaned,
